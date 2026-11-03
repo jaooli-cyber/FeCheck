@@ -1,0 +1,11 @@
+use super::outcome::PropertyVerdict
+
+/// Evaluate one property while forwarding the property's complete effect row.
+pub fn evaluate_property<P: Fn(u256) -> PropertyVerdict>(
+    _ property: P,
+    _ value: u256,
+) -> PropertyVerdict
+uses P::E
+{
+    property(value)
+}

@@ -1,0 +1,59 @@
+use ingot::{
+    ActionSeq,
+    FailureKey,
+    PropertyVerdict,
+    action_seq_is_valid,
+    action_seq_u256_digest,
+    evaluate_property,
+    verdict_tag,
+}
+
+struct EvalCounter { count: u256 }
+
+fn pure_property(_ value: u256) -> PropertyVerdict {
+    if value < 10 {
+        PropertyVerdict::Pass
+    } else {
+        PropertyVerdict::Fail(FailureKey { kind: 1, detail: 0 })
+    }
+}
+
+fn counted_property(_ value: u256) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    pure_property(value)
+}
+
+#[test]
+fn property_callable_forwards_pure_and_effectful_rows() {
+    assert!(verdict_tag(evaluate_property(pure_property, 7)) == 0)
+    assert!(verdict_tag(evaluate_property(pure_property, 12)) == 2)
+
+    var counter = EvalCounter { count: 0 }
+    let tag = with (EvalCounter = mut counter) {
+        verdict_tag(evaluate_property(counted_property, 7))
+    }
+    assert!(tag == 0)
+    assert!(counter.count == 1)
+}
+
+#[test]
+fn action_sequence_is_copy_bounded_and_tail_independent() {
+    let left = ActionSeq<u256, 4> { items: [7, 9, 111, 222], len: 2 }
+    let right = ActionSeq<u256, 4> { items: [7, 9, 333, 444], len: 2 }
+    let changed = ActionSeq<u256, 4> { items: [7, 8, 111, 222], len: 2 }
+    let copied = left
+
+    assert!(action_seq_is_valid(left, 2))
+    assert!(!action_seq_is_valid(left, 1))
+    assert!(!action_seq_is_valid(left, 5))
+    assert!(copied.items[0] == 7)
+    assert!(copied.len == 2)
+    assert!(
+        action_seq_u256_digest(left) == action_seq_u256_digest(right),
+    )
+    assert!(
+        action_seq_u256_digest(left) != action_seq_u256_digest(changed),
+    )
+}

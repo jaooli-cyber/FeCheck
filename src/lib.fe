@@ -1,4 +1,6 @@
+pub use action_seq::*
 pub use outcome::*
+pub use runner::*
 pub use scalar::*
 
 /// Version of FeCheck's public deterministic format.

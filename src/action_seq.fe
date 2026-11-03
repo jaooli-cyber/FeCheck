@@ -1,0 +1,27 @@
+use std::evm::keccak_words
+
+pub struct ActionSeq<A, const N: usize> { pub items: [A; N], pub len: usize }
+
+impl<A, const N: usize> Copy for ActionSeq<A, N> where A: Copy {}
+
+pub fn action_seq_is_valid<A, const N: usize>(
+    _ sequence: ActionSeq<A, N>,
+    _ max_actions: usize,
+) -> bool
+where A: Copy
+{
+    sequence.len <= max_actions && max_actions <= N
+}
+
+/// Logical digest for the u256 spike. Physical tail elements are ignored.
+pub fn action_seq_u256_digest<const N: usize>(_ sequence: ActionSeq<u256, N>) -> u256 {
+    assert!(sequence.len <= N)
+
+    var digest = keccak_words([0x4645434845434b, sequence.len as u256])
+    var index: usize = 0
+    while index < sequence.len {
+        digest = keccak_words([digest, sequence.items[index]])
+        index += 1
+    }
+    digest
+}
