@@ -150,12 +150,13 @@ For the scalar `u256` path, the five canonical domain preimage sizes are:
 - `FECHECK/VALUE/V1`: 272 bytes.
 
 `tools/oracle_vectors.py` independently constructs every byte, prints each
-preimage, and verifies 25 Keccak goldens with PyCryptodome 3.23.0. They cover
+preimage, and verifies 31 Keccak goldens with PyCryptodome 3.23.0. They cover
 Bool strategy identities, the scalar seeded full-domain RNG branch, ActionSeq
 logical encoding and dynamic value encoding, zero/one/full edge configurations,
-the complete seed-plus-four-word random sequence chain, and a sequence run
-fingerprint. Fe tests also mutate every scalar strategy and run field
-individually.
+the complete seed-plus-four-word random sequence chain, a sequence run
+fingerprint, and the non-edge sequence attempt at index four through its
+attempt seed, four RNG words, and dynamic value digest. Fe tests also mutate
+every scalar strategy and run field individually.
 
 ## Certified replay
 
@@ -198,12 +199,25 @@ The fresh property evaluation is classified as follows:
 A same-key replay is `Reproduced` only when reduced digest, every shrink
 counter, and shrink status match the capsule.
 
+The pure sequence path uses the distinct `U256ActionSeqReplayCapsule` type, so a
+scalar capsule cannot be supplied to sequence replay. The
+`check_u256_action_seq_certified` and
+`replay_u256_action_seq_capsule` entry points apply the same version,
+configuration, identity, structural-statistics, and exact-shrink-evidence rules.
+The sequence generation fingerprint additionally binds physical capacity,
+maximum logical length, and the complete action strategy, while its run
+fingerprint requires the ActionSeq codec. Replay regenerates only the recorded
+attempt, validates the canonical dynamic sequence digest before evaluating the
+property, and never executes the recorded prefix. This certificate covers the
+pure sequence path only; it is not evidence of stateful EVM execution.
+
 ## Pure-property boundary
 
 `check_u256_pure`, `check_u256_certified`, and `replay_u256_capsule` accept only
-`P: PureU256Property`. Its `evaluate` method has an empty Fe effect row, so
-effectful counters or mutable-history dependencies cannot cross the public
-certification boundary. Effect-forwarding callable adapters exist only as
+`P: PureU256Property`. Their sequence counterparts accept only
+`P: PureU256ActionSeqProperty<N>`. Both `evaluate` methods have an empty Fe
+effect row, so effectful counters or mutable-history dependencies cannot cross
+the public certification boundary. Effect-forwarding callable adapters exist only as
 `pub(ingot)` test and instrumentation primitives. The prevalidated shrink
 primitive is likewise ingot-internal; the checked runner and replay establish
 its original-failure precondition.
@@ -297,6 +311,10 @@ run requires `action_seq_u256_codec_fingerprint()`; scalar and sequence codecs
 are rejected across runners before property evaluation. Pure sequence length
 does not increment stateful counters or `actions_executed`.
 
-Certified sequence capsules and direct sequence replay are not yet implemented.
-Stateful evaluation must additionally create a fresh fixture and model for every
-candidate. Those layers are not yet claimed.
+The pure sequence runner now has certified capsules and direct replay. Its
+distinct capsule binds all sequence strategy and run identity described above,
+and replay checks the original canonical digest before property evaluation,
+then reproduces the exact failure-key-preserving shrink evidence. Stateful
+evaluation must additionally create a fresh fixture and model for every
+candidate. Stateful capsules, fixtures, deployment accounting, and those
+execution layers are not yet claimed.

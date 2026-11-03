@@ -3,9 +3,9 @@
 FeCheck is a deterministic property-testing, replay, and counterexample-shrinking
 toolkit written in Fe for the Fe Builders Challenge.
 
-The implemented vertical remains deliberately pure: a certified `u256` range
-runner is now joined by the first canonical `ActionSeq<u256, N>` kernel. Stateful
-EVM model testing is not claimed yet.
+The implemented vertical remains deliberately pure: certified `u256` range and
+canonical `ActionSeq<u256, N>` runners now produce directly replayable
+failure capsules. Stateful EVM model testing is not claimed yet.
 
 ## What works now
 
@@ -29,16 +29,21 @@ EVM model testing is not claimed yet.
 - an effect-free pure ActionSeq runner with stable `FailureKey`, phase-A restart
   after acceptance, exact complete/partial budgets, and scalar-compatible
   accounting;
+- a distinct typed ActionSeq capsule and direct replay path that bind capacity,
+  maximum length, action strategy, codec, run configuration, attempt identity,
+  canonical dynamic value digests, and exact shrink evidence without executing
+  the attempt prefix;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
   for every scalar strategy and run fingerprint field.
 
-The suite currently contains 66 passing Fe tests. The sequence tests include all
+The suite currently contains 76 passing Fe tests. The sequence tests include all
 small values in `0..2` at every logical length through three, comparison against
 an independent reference enumerator, exact shrink order and deduplication,
 private-tail independence, capacities zero through the deliberately supported
 maximum of four, termination after all 1,038 worst-case candidates, RNG
-consumption across every physical slot, and canonical assertions backed by 25
-independent Python vectors, including the sequence run fingerprint.
+consumption across every physical slot, and canonical assertions backed by 31
+independent Python vectors, including the sequence run fingerprint and a
+non-edge attempt at index four through its complete RNG chain and value digest.
 
 ## Verify
 
@@ -80,17 +85,19 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
 - `src/action_seq.fe`: canonical bounded-u256 sequence kernel and retained V0
   non-wire spike.
 - `src/action_seq_runner.fe`: pure sequence runner and fixed-point shrinking.
-- `src/action_seq_tests.fe` and `src/action_seq_runner_tests.fe`: exhaustive
-  kernel evidence plus runner budgets, accounting, and failure classification.
+- `src/action_seq_capsule.fe`: certified sequence reports, typed capsules, and
+  direct sequence replay.
+- `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`, and
+  `src/action_seq_capsule_tests.fe`: exhaustive kernel evidence plus runner,
+  capsule, budget, accounting, tamper, and failure-classification coverage.
 - `tools/oracle_vectors.py`: independent canonical-preimage oracle.
 - `docs/SEMANTICS.md`: normative behavior implemented by the current slice.
 
 ## Status and limitations
 
-This is an active contest build, not a finished submission. The scalar runner
-and certified replay path are verified. The canonical sequence kernel and its
-pure `FailureKey`-preserving runner are implemented, but sequence capsules and
-direct sequence replay are not yet implemented. Stateful EVM fixtures,
+This is an active contest build, not a finished submission. The scalar and
+canonical sequence kernels, pure `FailureKey`-preserving runners, certified
+capsules, and direct replay paths are verified. Stateful EVM fixtures,
 fresh-per-candidate model execution, deployment salts, measured state/deployment
 limits, external capsule serialization/decoding, and the final demo remain in
 development. Gate C is therefore partial and is not represented as complete.

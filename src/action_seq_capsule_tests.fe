@@ -1,0 +1,1038 @@
+use ingot::{
+    ERROR_INVALID_ACTION_SEQ_CAPACITY,
+    ERROR_INVALID_RANGE,
+    ERROR_REPLAY_ALGORITHM_VERSION,
+    ERROR_REPLAY_ATTEMPT_IDENTITY,
+    ERROR_REPLAY_CAPSULE_FORMAT,
+    ERROR_REPLAY_EDGE_POLICY_VERSION,
+    ERROR_REPLAY_FLAGS,
+    ERROR_REPLAY_GENERATION_FINGERPRINT,
+    ERROR_REPLAY_NAMESPACE,
+    ERROR_REPLAY_RUN_FINGERPRINT,
+    ERROR_REPLAY_RUN_STATS,
+    ERROR_REPLAY_SUITE,
+    ERROR_UNSUPPORTED_CODEC,
+    EVIDENCE_REDUCED_DIGEST,
+    EVIDENCE_SHRINK_STATS,
+    EVIDENCE_SHRINK_STATUS,
+    ActionSeq,
+    ErrorCode,
+    FailureKey,
+    PureU256ActionSeqProperty,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    ShrinkStatus,
+    U256ActionSeqReplayCapsule,
+    U256ActionSeqReplayOutcome,
+    U256ActionSeqRunReport,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_empty,
+    action_seq_get,
+    action_seq_len,
+    action_seq_u256_codec_fingerprint,
+    attempt_seed,
+    check_u256_action_seq_certified,
+    empty_run_stats,
+    empty_shrink_stats,
+    generation_fingerprint,
+    replay_u256_action_seq_capsule,
+    replay_u256_action_seq_capsule_with_callable,
+    run_fingerprint,
+    u256_action_seq_digest,
+    u256_action_seq_fingerprint,
+    u256_codec_fingerprint,
+}
+
+struct EvalCounter { count: u256 }
+
+fn config() -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+fn strategy() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy { action: U256Range { lo: 0, hi: 3, origin: 0 }, max_actions: 3 }
+}
+
+fn fail_at_length_two(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    if action_seq_len(value) >= 2 {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+fn counted_fail_at_length_two(_ value: ActionSeq<u256, 3>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    fail_at_length_two(value)
+}
+
+fn counted_pass_3(_ value: ActionSeq<u256, 3>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    PropertyVerdict::Pass
+}
+
+fn counted_pass_4(_ value: ActionSeq<u256, 4>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    PropertyVerdict::Pass
+}
+
+fn counted_pass_5(_ value: ActionSeq<u256, 5>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    PropertyVerdict::Pass
+}
+
+struct FailEmptyZeroProperty {}
+
+impl Copy for FailEmptyZeroProperty {}
+
+impl PureU256ActionSeqProperty<0> for FailEmptyZeroProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 0>) -> PropertyVerdict {
+        PropertyVerdict::Fail(FailureKey { kind: 1, detail: 0 })
+    }
+}
+
+struct FailAtLengthTwoProperty {}
+
+impl Copy for FailAtLengthTwoProperty {}
+
+impl PureU256ActionSeqProperty<3> for FailAtLengthTwoProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        fail_at_length_two(value)
+    }
+}
+
+struct AlwaysPassProperty {}
+
+impl Copy for AlwaysPassProperty {}
+
+impl PureU256ActionSeqProperty<3> for AlwaysPassProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Pass
+    }
+}
+
+struct AlwaysDiscardProperty {}
+
+impl Copy for AlwaysDiscardProperty {}
+
+impl PureU256ActionSeqProperty<3> for AlwaysDiscardProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Discard
+    }
+}
+
+struct DifferentFailureProperty {}
+
+impl Copy for DifferentFailureProperty {}
+
+impl PureU256ActionSeqProperty<3> for DifferentFailureProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Fail(FailureKey { kind: 6, detail: 9 })
+    }
+}
+
+struct DifferentDetailProperty {}
+
+impl Copy for DifferentDetailProperty {}
+
+impl PureU256ActionSeqProperty<3> for DifferentDetailProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 8 })
+    }
+}
+
+struct InfrastructureProperty {}
+
+impl Copy for InfrastructureProperty {}
+
+impl PureU256ActionSeqProperty<3> for InfrastructureProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::InfrastructureError(ErrorCode { kind: 999, detail: 7 })
+    }
+}
+
+struct RandomBranchProperty {}
+
+impl Copy for RandomBranchProperty {}
+
+impl PureU256ActionSeqProperty<3> for RandomBranchProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        random_branch_verdict(value)
+    }
+}
+
+fn random_branch_verdict(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    let len = action_seq_len(value)
+    if len == 1 {
+        return PropertyVerdict::Discard
+    }
+    if len == 3 {
+        match action_seq_get(value, 0) {
+            Option::Some(first) => {
+                if first != 0 {
+                    return PropertyVerdict::Fail(FailureKey { kind: 7, detail: 4 })
+                }
+            },
+            Option::None => {},
+        }
+    }
+    PropertyVerdict::Pass
+}
+
+fn counted_random_branch(_ value: ActionSeq<u256, 3>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    random_branch_verdict(value)
+}
+
+fn empty_capsule() -> U256ActionSeqReplayCapsule {
+    U256ActionSeqReplayCapsule {
+        format_version: 0,
+        algorithm_version: 0,
+        edge_policy_version: 0,
+        suite_id: 0,
+        run_namespace: 0,
+        master_seed: 0,
+        attempt_index: 0,
+        attempt_identity: 0,
+        generation_fingerprint: 0,
+        run_fingerprint: 0,
+        failure_key: FailureKey { kind: 0, detail: 0 },
+        flags: 0,
+        original_digest: 0,
+        reduced_digest: 0,
+        run_stats: empty_run_stats(),
+        shrink_stats: empty_shrink_stats(),
+        shrink_status: ShrinkStatus::PartialBudget,
+    }
+}
+
+fn expect_capsule(_ report: U256ActionSeqRunReport<3>) -> U256ActionSeqReplayCapsule {
+    match report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+}
+
+fn expect_zero_capsule(_ report: U256ActionSeqRunReport<0>) -> U256ActionSeqReplayCapsule {
+    match report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+}
+
+fn failure_capsule() -> U256ActionSeqReplayCapsule {
+    expect_capsule(
+        check_u256_action_seq_certified(strategy(), 7, config(), FailAtLengthTwoProperty {}),
+    )
+}
+
+fn incompatible_kind<const N: usize>(_ outcome: U256ActionSeqReplayOutcome<N>) -> u256 {
+    match outcome {
+        U256ActionSeqReplayOutcome::Incompatible { error } => error.kind,
+        _ => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn configuration_kind<const N: usize>(_ outcome: U256ActionSeqReplayOutcome<N>) -> u256 {
+    match outcome {
+        U256ActionSeqReplayOutcome::ConfigurationError { error } => error.kind,
+        _ => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_digest(_ strategy: U256ActionSeqStrategy<3>, _ value: ActionSeq<u256, 3>) -> u256 {
+    match u256_action_seq_digest(strategy, value) {
+        Result::Ok(digest) => digest,
+        Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn certified_sequence_run_replays_directly_without_executing_the_prefix() {
+    let sequence_strategy = strategy()
+    let report = check_u256_action_seq_certified(
+        sequence_strategy,
+        7,
+        config(),
+        FailAtLengthTwoProperty {},
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(failure.kind == 5)
+            assert!(failure.detail == 9)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.property_evaluations == 8)
+            assert!(shrink.evaluations == 5)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_capsule(report)
+    assert!(capsule.attempt_index == 2)
+    assert!(capsule.run_stats.attempts == 3)
+    let strategy_fp = u256_action_seq_fingerprint(sequence_strategy)
+    let generation = generation_fingerprint(strategy_fp)
+    assert!(capsule.generation_fingerprint == generation)
+    assert!(
+        capsule.run_fingerprint == run_fingerprint(generation, config()),
+    )
+    assert!(capsule.attempt_identity == attempt_seed(7, 2, generation))
+
+    match report.outcome {
+        RunOutcome::Falsified {
+            original,
+            minimal,
+            failure: _,
+            stats: _,
+            shrink: _,
+            shrink_status: _,
+        } => {
+            assert!(
+                capsule.original_digest == expect_digest(sequence_strategy, original),
+            )
+            assert!(
+                capsule.reduced_digest == expect_digest(sequence_strategy, minimal),
+            )
+        },
+        _ => assert!(false),
+    }
+
+    var counter = EvalCounter { count: 0 }
+    let replayed = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            capsule,
+            counted_fail_at_length_two,
+        )
+    }
+    match replayed {
+        U256ActionSeqReplayOutcome::Reproduced { original, minimal, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(shrink.evaluations == 5)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 6)
+}
+
+#[test]
+fn zero_capacity_sequence_is_certified_and_replayed_without_shrink_evaluations() {
+    let zero_strategy: U256ActionSeqStrategy<0> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 0, origin: 0 },
+        max_actions: 0,
+    }
+    let report = check_u256_action_seq_certified(
+        zero_strategy,
+        7,
+        config(),
+        FailEmptyZeroProperty {},
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 0)
+            assert!(action_seq_len(minimal) == 0)
+            assert!(failure.kind == 1)
+            assert!(stats.attempts == 1)
+            assert!(stats.property_evaluations == 1)
+            assert!(shrink.evaluations == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_zero_capsule(report)
+    assert!(capsule.attempt_index == 0)
+    match replay_u256_action_seq_capsule(
+        zero_strategy,
+        config(),
+        capsule,
+        FailEmptyZeroProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::Reproduced { original, minimal, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 0)
+            assert!(action_seq_len(minimal) == 0)
+            assert!(shrink.evaluations == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_replay_preflight_rejects_tampering_before_property_evaluation() {
+    let sequence_strategy = strategy()
+    let capsule = failure_capsule()
+    var counter = EvalCounter { count: 0 }
+
+    var bad_format = capsule
+    bad_format.format_version = 2
+    var invalid_config = config()
+    invalid_config.target_valid_cases = 4096
+    invalid_config.max_discards = 1
+    let format_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            invalid_config,
+            bad_format,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(format_result) == ERROR_REPLAY_CAPSULE_FORMAT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_algorithm = capsule
+    bad_algorithm.algorithm_version = 2
+    let algorithm_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_algorithm,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(algorithm_result) == ERROR_REPLAY_ALGORITHM_VERSION,
+    )
+    assert!(counter.count == 0)
+
+    var bad_edge = capsule
+    bad_edge.edge_policy_version = 2
+    let edge_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_edge,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(edge_result) == ERROR_REPLAY_EDGE_POLICY_VERSION,
+    )
+    assert!(counter.count == 0)
+
+    var wrong_codec = config()
+    wrong_codec.codec_fingerprint = u256_codec_fingerprint()
+    let codec_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            wrong_codec,
+            capsule,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        configuration_kind(codec_result) == ERROR_UNSUPPORTED_CODEC,
+    )
+    assert!(counter.count == 0)
+
+    let invalid_strategy = U256ActionSeqStrategy {
+        action: U256Range { lo: 3, hi: 2, origin: 3 },
+        max_actions: 3,
+    }
+    let strategy_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            invalid_strategy,
+            config(),
+            capsule,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(configuration_kind(strategy_result) == ERROR_INVALID_RANGE)
+    assert!(counter.count == 0)
+
+    var bad_suite = capsule
+    bad_suite.suite_id += 1
+    let suite_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_suite,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(incompatible_kind(suite_result) == ERROR_REPLAY_SUITE)
+    assert!(counter.count == 0)
+
+    var bad_namespace = capsule
+    bad_namespace.run_namespace += 1
+    let namespace_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_namespace,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(namespace_result) == ERROR_REPLAY_NAMESPACE,
+    )
+    assert!(counter.count == 0)
+
+    var bad_flags = capsule
+    bad_flags.flags = 1
+    let flags_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_flags,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(incompatible_kind(flags_result) == ERROR_REPLAY_FLAGS)
+    assert!(counter.count == 0)
+
+    var bad_generation = capsule
+    bad_generation.generation_fingerprint = 0
+    let generation_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_generation,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(generation_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_run = capsule
+    bad_run.run_fingerprint = 0
+    let run_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_run,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(run_result) == ERROR_REPLAY_RUN_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_seed = capsule
+    bad_seed.master_seed += 1
+    let seed_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_seed,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(seed_result) == ERROR_REPLAY_ATTEMPT_IDENTITY,
+    )
+    assert!(counter.count == 0)
+
+    var bad_index = capsule
+    bad_index.attempt_index -= 1
+    let index_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_index,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(index_result) == ERROR_REPLAY_ATTEMPT_IDENTITY,
+    )
+    assert!(counter.count == 0)
+
+    var bad_stats = capsule
+    bad_stats.run_stats.attempts += 1
+    let stats_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_stats,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(incompatible_kind(stats_result) == ERROR_REPLAY_RUN_STATS)
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn sequence_replay_binds_capacity_max_actions_and_action_strategy() {
+    let capsule = failure_capsule()
+    var counter = EvalCounter { count: 0 }
+
+    let capacity_four: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 0 },
+        max_actions: 3,
+    }
+    let capacity_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            capacity_four,
+            config(),
+            capsule,
+            counted_pass_4,
+        )
+    }
+    assert!(
+        incompatible_kind(capacity_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    let capacity_five: U256ActionSeqStrategy<5> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 0 },
+        max_actions: 3,
+    }
+    let oversized_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            capacity_five,
+            config(),
+            capsule,
+            counted_pass_5,
+        )
+    }
+    assert!(
+        configuration_kind(oversized_result) == ERROR_INVALID_ACTION_SEQ_CAPACITY,
+    )
+    assert!(counter.count == 0)
+
+    let different_max = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 0 },
+        max_actions: 2,
+    }
+    let max_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            different_max,
+            config(),
+            capsule,
+            counted_pass_3,
+        )
+    }
+    assert!(
+        incompatible_kind(max_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    let different_action = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 4, origin: 0 },
+        max_actions: 3,
+    }
+    let action_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            different_action,
+            config(),
+            capsule,
+            counted_pass_3,
+        )
+    }
+    assert!(
+        incompatible_kind(action_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    let different_lo = U256ActionSeqStrategy {
+        action: U256Range { lo: 1, hi: 3, origin: 1 },
+        max_actions: 3,
+    }
+    let lo_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            different_lo,
+            config(),
+            capsule,
+            counted_pass_3,
+        )
+    }
+    assert!(
+        incompatible_kind(lo_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    let different_origin = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 1 },
+        max_actions: 3,
+    }
+    let origin_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            different_origin,
+            config(),
+            capsule,
+            counted_pass_3,
+        )
+    }
+    assert!(
+        incompatible_kind(origin_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn sequence_replay_rejects_zero_target_capsule_evidence_before_property() {
+    var zero_config = config()
+    zero_config.target_valid_cases = 0
+    var capsule = failure_capsule()
+    capsule.run_fingerprint = run_fingerprint(capsule.generation_fingerprint, zero_config)
+
+    var counter = EvalCounter { count: 0 }
+    let result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            strategy(),
+            zero_config,
+            capsule,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(incompatible_kind(result) == ERROR_REPLAY_RUN_STATS)
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn sequence_replay_classifies_changed_property_results_and_failure_key_fields() {
+    let capsule = failure_capsule()
+
+    match replay_u256_action_seq_capsule(strategy(), config(), capsule, AlwaysPassProperty {}) {
+        U256ActionSeqReplayOutcome::FailureNotObserved => {},
+        _ => assert!(false),
+    }
+    match replay_u256_action_seq_capsule(strategy(), config(), capsule, AlwaysDiscardProperty {}) {
+        U256ActionSeqReplayOutcome::ReplayInputDiscarded => {},
+        _ => assert!(false),
+    }
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        capsule,
+        DifferentFailureProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::FailureKeyMismatch { expected, observed } => {
+            assert!(expected.kind == 5)
+            assert!(observed.kind == 6)
+        },
+        _ => assert!(false),
+    }
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        capsule,
+        DifferentDetailProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::FailureKeyMismatch { expected, observed } => {
+            assert!(expected.detail == 9)
+            assert!(observed.detail == 8)
+        },
+        _ => assert!(false),
+    }
+    match replay_u256_action_seq_capsule(strategy(), config(), capsule, InfrastructureProperty {}) {
+        U256ActionSeqReplayOutcome::ReplayInfrastructureError { error } => {
+            assert!(error.kind == 999)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_replay_detects_digest_and_shrink_evidence_tampering() {
+    let capsule = failure_capsule()
+    var counter = EvalCounter { count: 0 }
+
+    var bad_original = capsule
+    bad_original.original_digest = 0
+    let original_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            strategy(),
+            config(),
+            bad_original,
+            counted_fail_at_length_two,
+        )
+    }
+    match original_result {
+        U256ActionSeqReplayOutcome::OriginalDigestMismatch { expected, observed } => {
+            assert!(expected == 0)
+            assert!(observed == capsule.original_digest)
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 0)
+
+    var bad_reduced = capsule
+    bad_reduced.reduced_digest = 0
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        bad_reduced,
+        FailAtLengthTwoProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_REDUCED_DIGEST)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_shrink = capsule
+    bad_shrink.shrink_stats.accepted += 1
+    bad_shrink.shrink_stats.rejected_pass -= 1
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        bad_shrink,
+        FailAtLengthTwoProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_SHRINK_STATS)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_status = capsule
+    bad_status.shrink_status = ShrinkStatus::PartialBudget
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        bad_status,
+        FailAtLengthTwoProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_SHRINK_STATUS)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_key = capsule
+    bad_key.failure_key.detail = 8
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        config(),
+        bad_key,
+        FailAtLengthTwoProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::FailureKeyMismatch { expected, observed } => {
+            assert!(expected.detail == 8)
+            assert!(observed.detail == 9)
+        },
+        _ => assert!(false),
+    }
+}
+
+fn assert_budget_replays(_ budget: u256, _ expect_complete: bool) {
+    var budget_config = config()
+    budget_config.max_shrink_evaluations = budget
+    let report = check_u256_action_seq_certified(
+        strategy(),
+        7,
+        budget_config,
+        FailAtLengthTwoProperty {},
+    )
+    let capsule = expect_capsule(report)
+    match replay_u256_action_seq_capsule(
+        strategy(),
+        budget_config,
+        capsule,
+        FailAtLengthTwoProperty {},
+    ) {
+        U256ActionSeqReplayOutcome::Reproduced {
+            original: _,
+            minimal: _,
+            shrink,
+            shrink_status,
+        } => {
+            assert!(shrink.evaluations == budget)
+            if expect_complete {
+                match shrink_status {
+                    ShrinkStatus::CompleteLocal => {},
+                    ShrinkStatus::PartialBudget => assert!(false),
+                }
+            } else {
+                match shrink_status {
+                    ShrinkStatus::PartialBudget => {},
+                    ShrinkStatus::CompleteLocal => assert!(false),
+                }
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_capsules_replay_zero_partial_and_exact_complete_budgets() {
+    assert_budget_replays(0, false)
+    assert_budget_replays(3, false)
+    assert_budget_replays(5, true)
+}
+
+#[test]
+fn sequence_certification_emits_no_capsule_for_non_falsified_outcomes() {
+    let passed = check_u256_action_seq_certified(strategy(), 7, config(), AlwaysPassProperty {})
+    assert!(passed.capsule.is_none())
+
+    let infrastructure = check_u256_action_seq_certified(
+        strategy(),
+        7,
+        config(),
+        InfrastructureProperty {},
+    )
+    assert!(infrastructure.capsule.is_none())
+
+    var wrong_codec = config()
+    wrong_codec.codec_fingerprint = u256_codec_fingerprint()
+    let invalid = check_u256_action_seq_certified(strategy(), 7, wrong_codec, AlwaysPassProperty {})
+    assert!(invalid.capsule.is_none())
+
+    var discard_config = config()
+    discard_config.max_discards = 0
+    let exhausted = check_u256_action_seq_certified(
+        strategy(),
+        7,
+        discard_config,
+        AlwaysDiscardProperty {},
+    )
+    assert!(exhausted.capsule.is_none())
+}
+
+#[test]
+fn random_attempt_after_pass_and_discard_is_certified_and_replayed_directly() {
+    let full_strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 3,
+    }
+    var random_config = config()
+    random_config.target_valid_cases = 4
+    random_config.max_discards = 2
+    random_config.max_shrink_evaluations = 1
+
+    let report = check_u256_action_seq_certified(
+        full_strategy,
+        7,
+        random_config,
+        RandomBranchProperty {},
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure: _, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 3)
+            match action_seq_get(original, 0) {
+                Option::Some(first) => {
+                    assert!(
+                        first == 0x58c3ab1ef741084ac6da3d607903ccecc228594f7e0f10dfa21b10ab798db4f9,
+                    )
+                },
+                Option::None => assert!(false),
+            }
+            match action_seq_get(original, 1) {
+                Option::Some(second) => {
+                    assert!(
+                        second
+                            == 0x9d6402469402e13565fffef60f8ed17fc8b83308fbf303f5cc7b2d62fee5db63,
+                    )
+                },
+                Option::None => assert!(false),
+            }
+            match action_seq_get(original, 2) {
+                Option::Some(third) => {
+                    assert!(
+                        third == 0x4c7adfba5d34ac07cb86f5daa18278437735b7824ad2ad8648a5cbe532b02adf,
+                    )
+                },
+                Option::None => assert!(false),
+            }
+            assert!(stats.attempts == 5)
+            assert!(stats.valid_cases == 3)
+            assert!(stats.discards == 1)
+            assert!(shrink.evaluations == 1)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_capsule(report)
+    assert!(capsule.attempt_index == 4)
+    assert!(
+        capsule.attempt_identity
+            == 0xbeda1fdf94f0aa894e68e6db5f378d60e036c7128e0aacc3784be6d36809449c,
+    )
+    assert!(
+        capsule.original_digest
+            == 0xe0f704e3c6fd08a45108b36d3bec277bdfddbea47455cc2dd25573f471801867,
+    )
+
+    var counter = EvalCounter { count: 0 }
+    let replayed = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            full_strategy,
+            random_config,
+            capsule,
+            counted_random_branch,
+        )
+    }
+    match replayed {
+        U256ActionSeqReplayOutcome::Reproduced { original, minimal, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 3)
+            assert!(shrink.evaluations == 1)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 2)
+}

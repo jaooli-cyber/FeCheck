@@ -235,6 +235,33 @@ action_seq_random_value_preimage = (
 )
 action_seq_random_value_hash = keccak256(action_seq_random_value_preimage)
 
+action_seq_random_attempt4_preimage, action_seq_random_attempt4_hash = hash_word_fields(
+    "FECHECK/ATTEMPT/V1",
+    [7, 4, as_int(action_seq_random_generation_hash)],
+)
+action_seq_random4_word0_preimage = action_seq_random_attempt4_hash
+action_seq_random4_word0_hash = keccak256(action_seq_random4_word0_preimage)
+action_seq_random4_word1_preimage = action_seq_random4_word0_hash
+action_seq_random4_word1_hash = keccak256(action_seq_random4_word1_preimage)
+action_seq_random4_word2_preimage = action_seq_random4_word1_hash
+action_seq_random4_word2_hash = keccak256(action_seq_random4_word2_preimage)
+action_seq_random4_word3_preimage = action_seq_random4_word2_hash
+action_seq_random4_word3_hash = keccak256(action_seq_random4_word3_preimage)
+action_seq_random4_logical = encode_action_seq(
+    [
+        as_int(action_seq_random4_word1_hash),
+        as_int(action_seq_random4_word2_hash),
+        as_int(action_seq_random4_word3_hash),
+    ]
+)
+action_seq_random4_value_preimage = (
+    encode_bytes(b"FECHECK/VALUE/V1")
+    + u256(2)
+    + field(1, action_seq_random_strategy_hash)
+    + field(2, action_seq_random4_logical)
+)
+action_seq_random4_value_hash = keccak256(action_seq_random4_value_preimage)
+
 action_seq_run_preimage, action_seq_run_hash = hash_word_fields(
     "FECHECK/RUN/V1",
     [
@@ -302,6 +329,36 @@ VECTORS = {
         action_seq_random_value_preimage,
         action_seq_random_value_hash,
         "7a311e9c48901abebd3c7f5e337034c52dbbfd02be8266cb61a827dfe080ee4a",
+    ),
+    "action_seq_random_attempt4": (
+        action_seq_random_attempt4_preimage,
+        action_seq_random_attempt4_hash,
+        "beda1fdf94f0aa894e68e6db5f378d60e036c7128e0aacc3784be6d36809449c",
+    ),
+    "action_seq_random4_word0": (
+        action_seq_random4_word0_preimage,
+        action_seq_random4_word0_hash,
+        "2ac8a745367868e8bb59e00f985c1d1a5d556f0d316e9d1407e9879c248a9787",
+    ),
+    "action_seq_random4_word1": (
+        action_seq_random4_word1_preimage,
+        action_seq_random4_word1_hash,
+        "58c3ab1ef741084ac6da3d607903ccecc228594f7e0f10dfa21b10ab798db4f9",
+    ),
+    "action_seq_random4_word2": (
+        action_seq_random4_word2_preimage,
+        action_seq_random4_word2_hash,
+        "9d6402469402e13565fffef60f8ed17fc8b83308fbf303f5cc7b2d62fee5db63",
+    ),
+    "action_seq_random4_word3": (
+        action_seq_random4_word3_preimage,
+        action_seq_random4_word3_hash,
+        "4c7adfba5d34ac07cb86f5daa18278437735b7824ad2ad8648a5cbe532b02adf",
+    ),
+    "action_seq_random4_value": (
+        action_seq_random4_value_preimage,
+        action_seq_random4_value_hash,
+        "e0f704e3c6fd08a45108b36d3bec277bdfddbea47455cc2dd25573f471801867",
     ),
     "action_seq_run": (
         action_seq_run_preimage,

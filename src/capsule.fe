@@ -96,7 +96,7 @@ pub enum U256ReplayOutcome {
 
 impl Copy for U256ReplayOutcome {}
 
-fn shrink_stats_equal(_ left: ShrinkStats, _ right: ShrinkStats) -> bool {
+pub(ingot) fn shrink_stats_equal(_ left: ShrinkStats, _ right: ShrinkStats) -> bool {
     left.evaluations == right.evaluations
         && left.accepted == right.accepted
         && left.rejected_pass == right.rejected_pass
@@ -104,7 +104,7 @@ fn shrink_stats_equal(_ left: ShrinkStats, _ right: ShrinkStats) -> bool {
         && left.rejected_failure_key == right.rejected_failure_key
 }
 
-fn shrink_status_equal(_ left: ShrinkStatus, _ right: ShrinkStatus) -> bool {
+pub(ingot) fn shrink_status_equal(_ left: ShrinkStatus, _ right: ShrinkStatus) -> bool {
     match left {
         ShrinkStatus::CompleteLocal => {
             match right {
@@ -169,9 +169,12 @@ fn incompatible(_ kind: u256, _ detail: u256) -> U256ReplayOutcome {
     U256ReplayOutcome::Incompatible { error: ErrorCode { kind, detail } }
 }
 
-fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> Option<ErrorCode> {
-    let run = capsule.run_stats
-    let shrink = capsule.shrink_stats
+pub(ingot) fn replay_run_stats_error_for_evidence(
+    _ config: RunConfig,
+    _ attempt_index: u256,
+    _ run: RunStats,
+    _ shrink: ShrinkStats,
+) -> Option<ErrorCode> {
     if config.target_valid_cases == 0 {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 0 })
     }
@@ -180,7 +183,7 @@ fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> 
     if run.attempts == 0 || run.attempts > attempt_limit {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 1 })
     }
-    if capsule.attempt_index != run.attempts - 1 {
+    if attempt_index != run.attempts - 1 {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 2 })
     }
     if run.valid_cases >= config.target_valid_cases {
@@ -192,7 +195,7 @@ fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> 
     if run.attempts != run.valid_cases + run.discards + 1 {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 5 })
     }
-    if capsule.attempt_index >= attempt_limit {
+    if attempt_index >= attempt_limit {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 6 })
     }
     if shrink.evaluations > config.max_shrink_evaluations {
@@ -221,6 +224,15 @@ fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> 
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 11 })
     }
     Option::None
+}
+
+fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> Option<ErrorCode> {
+    replay_run_stats_error_for_evidence(
+        config,
+        capsule.attempt_index,
+        capsule.run_stats,
+        capsule.shrink_stats,
+    )
 }
 /// Ingot-only callable replay primitive used for prefix/counter instrumentation.
 /// It never evaluates attempts preceding `capsule.attempt_index` and is not
