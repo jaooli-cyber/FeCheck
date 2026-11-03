@@ -107,6 +107,25 @@ impl AsBytes for AttemptPreimage {
     }
 }
 
+struct FixturePreimage { f1: u256, f2: u256, f3: u256, f4: u256, f5: u256, f6: u256, f7: u256 }
+
+impl AsBytes for FixturePreimage {
+    const N: usize = 754
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(18, width: 32)
+        out.append("FECHECK/FIXTURE/V1" as String<18>)
+        out.push_word(7, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+        push_word_field(mut out, 3, self.f3)
+        push_word_field(mut out, 4, self.f4)
+        push_word_field(mut out, 5, self.f5)
+        push_word_field(mut out, 6, self.f6)
+        push_word_field(mut out, 7, self.f7)
+    }
+}
+
 struct ValuePreimage { f1: u256, f2: u256 }
 
 impl AsBytes for ValuePreimage {
@@ -177,6 +196,29 @@ pub fn canonical_attempt_seed(
 ) -> u256 {
     keccak(
         AttemptPreimage { f1: master_seed, f2: attempt_index, f3: generation_fingerprint },
+    )
+}
+
+/// Canonical CREATE2 salt for one role in a fresh stateful fixture evaluation.
+pub fn canonical_fixture_salt(
+    _ run_fingerprint: u256,
+    _ suite_id: u256,
+    _ namespace: u256,
+    _ master_seed: u256,
+    _ attempt_index: u256,
+    _ local_evaluation_index: u256,
+    _ role_tag: u256,
+) -> u256 {
+    keccak(
+        FixturePreimage {
+            f1: run_fingerprint,
+            f2: suite_id,
+            f3: namespace,
+            f4: master_seed,
+            f5: attempt_index,
+            f6: local_evaluation_index,
+            f7: role_tag,
+        },
     )
 }
 

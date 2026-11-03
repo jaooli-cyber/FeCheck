@@ -50,7 +50,6 @@ fn outcome_variants_are_data() {
         valid_cases: 3,
         discards: 1,
         property_evaluations: 8,
-        state_evaluations: 0,
         fixture_evaluations: 0,
         contract_deployments: 0,
         actions_executed: 0,

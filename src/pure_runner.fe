@@ -64,7 +64,6 @@ pub fn empty_run_stats() -> RunStats {
         valid_cases: 0,
         discards: 0,
         property_evaluations: 0,
-        state_evaluations: 0,
         fixture_evaluations: 0,
         contract_deployments: 0,
         actions_executed: 0,

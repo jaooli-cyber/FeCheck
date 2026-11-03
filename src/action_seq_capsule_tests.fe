@@ -612,6 +612,51 @@ fn sequence_replay_preflight_rejects_tampering_before_property_evaluation() {
     }
     assert!(incompatible_kind(stats_result) == ERROR_REPLAY_RUN_STATS)
     assert!(counter.count == 0)
+
+    var bad_fixture_count = capsule
+    bad_fixture_count.run_stats.fixture_evaluations = 1
+    let fixture_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_fixture_count,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(fixture_result) == ERROR_REPLAY_RUN_STATS,
+    )
+    assert!(counter.count == 0)
+
+    var bad_deployment_count = capsule
+    bad_deployment_count.run_stats.contract_deployments = 1
+    let deployment_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_deployment_count,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(deployment_result) == ERROR_REPLAY_RUN_STATS,
+    )
+    assert!(counter.count == 0)
+
+    var bad_action_count = capsule
+    bad_action_count.run_stats.actions_executed = 1
+    let action_count_result = with (EvalCounter = mut counter) {
+        replay_u256_action_seq_capsule_with_callable(
+            sequence_strategy,
+            config(),
+            bad_action_count,
+            counted_fail_at_length_two,
+        )
+    }
+    assert!(
+        incompatible_kind(action_count_result) == ERROR_REPLAY_RUN_STATS,
+    )
+    assert!(counter.count == 0)
 }
 
 #[test]

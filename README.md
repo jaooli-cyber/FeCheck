@@ -3,9 +3,10 @@
 FeCheck is a deterministic property-testing, replay, and counterexample-shrinking
 toolkit written in Fe for the Fe Builders Challenge.
 
-The implemented vertical remains deliberately pure: certified `u256` range and
-canonical `ActionSeq<u256, N>` runners now produce directly replayable
-failure capsules. Stateful EVM model testing is not claimed yet.
+The executable runner vertical remains deliberately pure: certified `u256`
+range and canonical `ActionSeq<u256, N>` runners produce directly replayable
+failure capsules. A separate stateful identity and budget-admission foundation
+now exists, but stateful EVM model testing is not claimed yet.
 
 ## What works now
 
@@ -33,17 +34,24 @@ failure capsules. Stateful EVM model testing is not claimed yet.
   maximum length, action strategy, codec, run configuration, attempt identity,
   canonical dynamic value digests, and exact shrink evidence without executing
   the attempt prefix;
+- canonical V1 fixture salts binding run identity, seed, attempt, local
+  evaluation, and stable Target/ActorA/ActorB role tags;
+- an ingot-internal state/deployment preflight plus a bounded caller-owned
+  duplicate registry, explicitly not presented as a certified stateful API, an
+  EVM-global registry, a persistent deployment reservation, or an EVM fixture
+  runner;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
   for every scalar strategy and run fingerprint field.
 
-The suite currently contains 76 passing Fe tests. The sequence tests include all
+The suite currently contains 85 passing Fe tests. The sequence tests include all
 small values in `0..2` at every logical length through three, comparison against
 an independent reference enumerator, exact shrink order and deduplication,
 private-tail independence, capacities zero through the deliberately supported
 maximum of four, termination after all 1,038 worst-case candidates, RNG
-consumption across every physical slot, and canonical assertions backed by 31
-independent Python vectors, including the sequence run fingerprint and a
-non-edge attempt at index four through its complete RNG chain and value digest.
+consumption across every physical slot, and canonical assertions backed by 32
+independent Python vectors, including the sequence run fingerprint, a non-edge
+attempt at index four through its complete RNG chain and value digest, and the
+754-byte fixture-salt preimage.
 
 ## Verify
 
@@ -87,9 +95,12 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
 - `src/action_seq_runner.fe`: pure sequence runner and fixed-point shrinking.
 - `src/action_seq_capsule.fe`: certified sequence reports, typed capsules, and
   direct sequence replay.
-- `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`, and
-  `src/action_seq_capsule_tests.fe`: exhaustive kernel evidence plus runner,
-  capsule, budget, accounting, tamper, and failure-classification coverage.
+- `src/stateful.fe`: stateful fixture identity, fixed deployment-plan
+  validation, atomic admission, and a caller-owned run registry.
+- `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`,
+  `src/action_seq_capsule_tests.fe`, `src/fixture_identity_tests.fe`, and
+  `src/stateful_tests.fe`: kernel, runner, capsule, canonical salt, budget,
+  registry, accounting, tamper, and failure-classification evidence.
 - `tools/oracle_vectors.py`: independent canonical-preimage oracle.
 - `docs/SEMANTICS.md`: normative behavior implemented by the current slice.
 
@@ -97,10 +108,12 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
 
 This is an active contest build, not a finished submission. The scalar and
 canonical sequence kernels, pure `FailureKey`-preserving runners, certified
-capsules, and direct replay paths are verified. Stateful EVM fixtures,
-fresh-per-candidate model execution, deployment salts, measured state/deployment
-limits, external capsule serialization/decoding, and the final demo remain in
-development. Gate C is therefore partial and is not represented as complete.
+capsules, and direct replay paths are verified. Canonical deployment salts and
+the pre-EVM state/deployment admission boundary are also verified. Actual
+stateful EVM fixtures, fresh-per-candidate model execution, successful
+deployment/action accounting, measured state/deployment limits, external
+capsule serialization/decoding, and the final demo remain in development. Gate
+C is therefore partial and is not represented as complete.
 
 See [PROVENANCE.md](PROVENANCE.md) for the contest boundary, prior-work
 disclosure, starter reuse, and AI-assistance statement.

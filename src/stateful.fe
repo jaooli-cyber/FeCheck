@@ -1,0 +1,251 @@
+use super::codec::canonical_fixture_salt
+use super::outcome::{ErrorCode, RunStats}
+use super::replay::RunConfig
+
+pub const FIXTURE_ROLE_TARGET_V1: u256 = 1
+pub const FIXTURE_ROLE_ACTOR_A_V1: u256 = 2
+pub const FIXTURE_ROLE_ACTOR_B_V1: u256 = 3
+
+pub const STATEFUL_RUN_REGISTRY_CAPACITY_V1: usize = 8
+
+pub const ERROR_STATEFUL_FIXTURE_PLAN_ZERO: u256 = 500
+pub const ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET: u256 = 501
+pub const ERROR_STATEFUL_EVALUATION_BUDGET: u256 = 502
+pub const ERROR_STATEFUL_DEPLOYMENT_BUDGET: u256 = 503
+pub const ERROR_STATEFUL_RUN_DUPLICATE: u256 = 504
+pub const ERROR_STATEFUL_RUN_REGISTRY_FULL: u256 = 505
+pub const ERROR_STATEFUL_ACCOUNTING_MISMATCH: u256 = 506
+
+/// Stable V1 roles for the three-instance P0 fixture.
+pub enum FixtureRole {
+    Target,
+    ActorA,
+    ActorB,
+}
+
+impl Copy for FixtureRole {}
+
+pub fn fixture_role_tag_v1(_ role: FixtureRole) -> u256 {
+    match role {
+        FixtureRole::Target => FIXTURE_ROLE_TARGET_V1,
+        FixtureRole::ActorA => FIXTURE_ROLE_ACTOR_A_V1,
+        FixtureRole::ActorB => FIXTURE_ROLE_ACTOR_B_V1,
+    }
+}
+
+/// Static deployment shape of one fresh stateful evaluation.
+pub struct StatefulFixturePlan { pub deployments_per_evaluation: u256 }
+
+impl Copy for StatefulFixturePlan {}
+
+/// Complete logical identity of one stateful property evaluation.
+///
+/// local_evaluation_index is zero for an original run or replay evaluation
+/// and starts at one for shrink candidates admitted to property evaluation.
+pub struct StatefulEvaluationContext {
+    pub run_fingerprint: u256,
+    pub suite_id: u256,
+    pub run_namespace: u256,
+    pub master_seed: u256,
+    pub attempt_index: u256,
+    pub local_evaluation_index: u256,
+}
+
+impl Copy for StatefulEvaluationContext {}
+
+pub fn stateful_fixture_salt(_ context: StatefulEvaluationContext, _ role: FixtureRole) -> u256 {
+    canonical_fixture_salt(
+        context.run_fingerprint,
+        context.suite_id,
+        context.run_namespace,
+        context.master_seed,
+        context.attempt_index,
+        context.local_evaluation_index,
+        fixture_role_tag_v1(role),
+    )
+}
+
+/// Ingot-internal plan check run only after global RunConfig/codec validation.
+/// It avoids multiplying attacker-controlled counters. A zero state-evaluation
+/// budget remains valid.
+pub(ingot) fn validate_stateful_fixture_plan(
+    _ config: RunConfig,
+    _ plan: StatefulFixturePlan,
+) -> Option<ErrorCode> {
+    let deployments = plan.deployments_per_evaluation
+    if deployments == 0 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_STATEFUL_FIXTURE_PLAN_ZERO, detail: 0 },
+        )
+    }
+    if config.max_state_evaluations > config.max_deployments / deployments {
+        return Option::Some(
+            ErrorCode { kind: ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET, detail: deployments },
+        )
+    }
+    Option::None
+}
+
+/// Result of atomic state/deployment preflight for one fixture evaluation.
+///
+/// Admission commits only fixture_evaluations. required_deployments is a
+/// requirement, not a persistent reservation: the scheduler must perform and
+/// account for that fixture before requesting another admission. Input
+/// statistics must therefore describe completed prior fixtures. Attempts,
+/// property, shrink, deployment, and action counters are not incremented here.
+/// A rejected result carries the field-for-field input statistics.
+pub enum StatefulAdmission {
+    Admitted {
+        pub stats: RunStats,
+        pub required_deployments: u256,
+    },
+    Rejected {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+    },
+}
+
+impl Copy for StatefulAdmission {}
+
+fn rejected_admission(_ error: ErrorCode, _ stats: RunStats) -> StatefulAdmission {
+    StatefulAdmission::Rejected { error, stats }
+}
+
+/// The caller must supply a globally validated config and scheduler-owned
+/// statistics from completed prior fixtures.
+pub(ingot) fn admit_stateful_evaluation(
+    _ config: RunConfig,
+    _ plan: StatefulFixturePlan,
+    _ stats: RunStats,
+) -> StatefulAdmission {
+    match validate_stateful_fixture_plan(config, plan) {
+        Option::Some(error) => {
+            return rejected_admission(error, stats)
+        },
+        Option::None => {},
+    }
+
+    if stats.contract_deployments % plan.deployments_per_evaluation != 0
+        || stats.contract_deployments / plan.deployments_per_evaluation
+            != stats.fixture_evaluations {
+        return rejected_admission(
+            ErrorCode {
+                kind: ERROR_STATEFUL_ACCOUNTING_MISMATCH,
+                detail: stats.contract_deployments,
+            },
+            stats,
+        )
+    }
+    if stats.fixture_evaluations >= config.max_state_evaluations {
+        return rejected_admission(
+            ErrorCode { kind: ERROR_STATEFUL_EVALUATION_BUDGET, detail: stats.fixture_evaluations },
+            stats,
+        )
+    }
+    if stats.contract_deployments > config.max_deployments {
+        return rejected_admission(
+            ErrorCode {
+                kind: ERROR_STATEFUL_DEPLOYMENT_BUDGET,
+                detail: stats.contract_deployments,
+            },
+            stats,
+        )
+    }
+    let remaining_deployments = config.max_deployments - stats.contract_deployments
+    if plan.deployments_per_evaluation > remaining_deployments {
+        return rejected_admission(
+            ErrorCode {
+                kind: ERROR_STATEFUL_DEPLOYMENT_BUDGET,
+                detail: plan.deployments_per_evaluation,
+            },
+            stats,
+        )
+    }
+
+    var admitted = stats
+    admitted.fixture_evaluations += 1
+    StatefulAdmission::Admitted {
+        stats: admitted,
+        required_deployments: plan.deployments_per_evaluation,
+    }
+}
+
+/// Fixed-capacity, caller-owned duplicate detector.
+///
+/// This registry proves only what one caller carries through its own calls. It
+/// is not a global EVM namespace registry and resetting or replacing it resets
+/// its knowledge.
+pub struct StatefulRunRegistry {
+    suite_ids: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+    namespaces: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+    len: usize,
+}
+
+impl Copy for StatefulRunRegistry {}
+
+pub fn stateful_run_registry_empty() -> StatefulRunRegistry {
+    StatefulRunRegistry {
+        suite_ids: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+        namespaces: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+        len: 0,
+    }
+}
+
+pub fn stateful_run_registry_len(_ registry: StatefulRunRegistry) -> usize {
+    registry.len
+}
+
+pub fn stateful_run_registry_contains(
+    _ registry: StatefulRunRegistry,
+    _ suite_id: u256,
+    _ run_namespace: u256,
+) -> bool {
+    var index: usize = 0
+    while index < registry.len {
+        if registry.suite_ids[index] == suite_id && registry.namespaces[index] == run_namespace {
+            return true
+        }
+        index += 1
+    }
+    false
+}
+
+pub enum StatefulRunRegistryClaim {
+    Claimed {
+        pub registry: StatefulRunRegistry,
+    },
+    Rejected {
+        pub error: ErrorCode,
+        pub registry: StatefulRunRegistry,
+    },
+}
+
+impl Copy for StatefulRunRegistryClaim {}
+
+pub fn stateful_run_registry_claim(
+    _ registry: StatefulRunRegistry,
+    _ suite_id: u256,
+    _ run_namespace: u256,
+) -> StatefulRunRegistryClaim {
+    if stateful_run_registry_contains(registry, suite_id, run_namespace) {
+        return StatefulRunRegistryClaim::Rejected {
+            error: ErrorCode { kind: ERROR_STATEFUL_RUN_DUPLICATE, detail: run_namespace },
+            registry,
+        }
+    }
+    if registry.len == STATEFUL_RUN_REGISTRY_CAPACITY_V1 {
+        return StatefulRunRegistryClaim::Rejected {
+            error: ErrorCode {
+                kind: ERROR_STATEFUL_RUN_REGISTRY_FULL,
+                detail: STATEFUL_RUN_REGISTRY_CAPACITY_V1 as u256,
+            },
+            registry,
+        }
+    }
+
+    var claimed = registry
+    claimed.suite_ids[claimed.len] = suite_id
+    claimed.namespaces[claimed.len] = run_namespace
+    claimed.len += 1
+    StatefulRunRegistryClaim::Claimed { registry: claimed }
+}
