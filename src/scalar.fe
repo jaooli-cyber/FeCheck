@@ -1,0 +1,102 @@
+pub struct ScalarShrinkCursor {
+    pub origin: u256,
+    pub current: u256,
+    pub next_step: u256,
+    pub emit_origin: bool,
+    pub done: bool,
+}
+
+impl Copy for ScalarShrinkCursor {}
+
+pub enum ScalarShrinkStep {
+    Done,
+    Candidate {
+        pub value: u256,
+        pub cursor: ScalarShrinkCursor,
+    },
+}
+
+impl Copy for ScalarShrinkStep {}
+
+pub fn scalar_rank(_ origin: u256, _ value: u256) -> u256 {
+    if value >= origin {
+        value - origin
+    } else {
+        origin - value
+    }
+}
+
+fn ceil_half(_ value: u256) -> u256 {
+    value / 2 + value % 2
+}
+
+pub fn scalar_shrink_start(_ origin: u256, _ current: u256) -> ScalarShrinkCursor {
+    let distance = scalar_rank(origin, current)
+    ScalarShrinkCursor {
+        origin,
+        current,
+        next_step: if distance > 1 {
+            ceil_half(distance)
+        } else {
+            0
+        },
+        emit_origin: distance > 0,
+        done: distance == 0,
+    }
+}
+
+pub fn scalar_shrink_next(_ cursor: ScalarShrinkCursor) -> ScalarShrinkStep {
+    if cursor.done {
+        return ScalarShrinkStep::Done
+    }
+
+    var next = cursor
+    if cursor.emit_origin {
+        next.emit_origin = false
+        if next.next_step == 0 {
+            next.done = true
+        }
+        return ScalarShrinkStep::Candidate { value: cursor.origin, cursor: next }
+    }
+
+    if cursor.next_step == 0 {
+        return ScalarShrinkStep::Done
+    }
+
+    let value = if cursor.current > cursor.origin {
+        cursor.current - cursor.next_step
+    } else {
+        cursor.current + cursor.next_step
+    }
+
+    if cursor.next_step == 1 {
+        next.next_step = 0
+        next.done = true
+    } else {
+        next.next_step = ceil_half(cursor.next_step)
+    }
+
+    ScalarShrinkStep::Candidate { value, cursor: next }
+}
+
+pub fn scalar_candidate_at(_ origin: u256, _ current: u256, _ ordinal: u256) -> Option<u256> {
+    var cursor = scalar_shrink_start(origin, current)
+    var index: u256 = 0
+
+    while index < 257 {
+        match scalar_shrink_next(cursor) {
+            ScalarShrinkStep::Done => {
+                return Option::None
+            },
+            ScalarShrinkStep::Candidate { value, cursor: next } => {
+                if index == ordinal {
+                    return Option::Some(value)
+                }
+                cursor = next
+                index += 1
+            },
+        }
+    }
+
+    Option::None
+}

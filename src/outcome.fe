@@ -1,0 +1,83 @@
+pub struct FailureKey { pub kind: u256, pub detail: u256 }
+
+impl Copy for FailureKey {}
+
+pub struct ErrorCode { pub kind: u256, pub detail: u256 }
+
+impl Copy for ErrorCode {}
+
+pub enum PropertyVerdict {
+    Pass,
+    Discard,
+    Fail(FailureKey),
+    InfrastructureError(ErrorCode),
+}
+
+impl Copy for PropertyVerdict {}
+
+pub struct RunStats {
+    pub attempts: u256,
+    pub valid_cases: u256,
+    pub discards: u256,
+    pub property_evaluations: u256,
+}
+
+impl Copy for RunStats {}
+
+pub struct ShrinkStats {
+    pub evaluations: u256,
+    pub accepted: u256,
+    pub rejected_pass: u256,
+    pub rejected_discard: u256,
+    pub rejected_failure_key: u256,
+}
+
+impl Copy for ShrinkStats {}
+
+pub enum ShrinkStatus {
+    CompleteLocal,
+    PartialBudget,
+}
+
+impl Copy for ShrinkStatus {}
+
+pub enum RunOutcome {
+    Passed { pub stats: RunStats },
+    Exhausted { pub stats: RunStats },
+    Falsified {
+        pub original: u256,
+        pub minimal: u256,
+        pub failure: FailureKey,
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+        pub shrink_status: ShrinkStatus,
+    },
+    InfrastructureError(ErrorCode),
+}
+
+impl Copy for RunOutcome {}
+
+pub fn verdict_tag(_ verdict: PropertyVerdict) -> u256 {
+    match verdict {
+        PropertyVerdict::Pass => 0,
+        PropertyVerdict::Discard => 1,
+        PropertyVerdict::Fail(_) => 2,
+        PropertyVerdict::InfrastructureError(_) => 3,
+    }
+}
+
+pub fn run_outcome_tag(_ outcome: RunOutcome) -> u256 {
+    match outcome {
+        RunOutcome::Passed { stats: _ } => 0,
+        RunOutcome::Exhausted { stats: _ } => 1,
+        RunOutcome::Falsified {
+            original: _,
+            minimal: _,
+            failure: _,
+            stats: _,
+            shrink: _,
+            shrink_status: _,
+        } => 2,
+        RunOutcome::InfrastructureError(_) => 3,
+    }
+}

@@ -1,7 +1,113 @@
-use ingot::{FECHECK_FORMAT_VERSION, identity}
+use ingot::{
+    ErrorCode,
+    FECHECK_FORMAT_VERSION,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ScalarShrinkStep,
+    ShrinkStats,
+    ShrinkStatus,
+    identity,
+    run_outcome_tag,
+    scalar_candidate_at,
+    scalar_rank,
+    scalar_shrink_next,
+    scalar_shrink_start,
+    verdict_tag,
+}
+
+fn expect_candidate(_ candidate: Option<u256>) -> u256 {
+    match candidate {
+        Option::Some(value) => value,
+        Option::None => {
+            assert!(false)
+            0
+        },
+    }
+}
 
 #[test]
 fn contest_scaffold_builds() {
     assert!(FECHECK_FORMAT_VERSION == 1)
     assert!(identity(7) == 7)
+}
+
+#[test]
+fn outcome_variants_are_data() {
+    let key = FailureKey { kind: 7, detail: 11 }
+    let error = ErrorCode { kind: 13, detail: 17 }
+    assert!(verdict_tag(PropertyVerdict::Pass) == 0)
+    assert!(verdict_tag(PropertyVerdict::Discard) == 1)
+    assert!(verdict_tag(PropertyVerdict::Fail(key)) == 2)
+    assert!(
+        verdict_tag(PropertyVerdict::InfrastructureError(error)) == 3,
+    )
+
+    let stats = RunStats { attempts: 5, valid_cases: 3, discards: 1, property_evaluations: 8 }
+    let shrink = ShrinkStats {
+        evaluations: 3,
+        accepted: 2,
+        rejected_pass: 1,
+        rejected_discard: 0,
+        rejected_failure_key: 0,
+    }
+    assert!(run_outcome_tag(RunOutcome::Passed { stats }) == 0)
+    assert!(run_outcome_tag(RunOutcome::Exhausted { stats }) == 1)
+    assert!(
+        run_outcome_tag(
+                RunOutcome::Falsified {
+                    original: 12,
+                    minimal: 10,
+                    failure: key,
+                    stats,
+                    shrink,
+                    shrink_status: ShrinkStatus::CompleteLocal,
+                },
+            )
+            == 2,
+    )
+    assert!(
+        run_outcome_tag(RunOutcome::InfrastructureError(error)) == 3,
+    )
+}
+
+#[test]
+fn scalar_shrink_order_is_deterministic() {
+    assert!(expect_candidate(scalar_candidate_at(0, 12, 0)) == 0)
+    assert!(expect_candidate(scalar_candidate_at(0, 12, 1)) == 6)
+    assert!(expect_candidate(scalar_candidate_at(0, 12, 2)) == 9)
+    assert!(expect_candidate(scalar_candidate_at(0, 12, 3)) == 10)
+    assert!(expect_candidate(scalar_candidate_at(0, 12, 4)) == 11)
+    assert!(scalar_candidate_at(0, 12, 5).is_none())
+
+    assert!(expect_candidate(scalar_candidate_at(0, 13, 0)) == 0)
+    assert!(expect_candidate(scalar_candidate_at(0, 13, 1)) == 6)
+    assert!(expect_candidate(scalar_candidate_at(0, 13, 2)) == 9)
+    assert!(expect_candidate(scalar_candidate_at(0, 13, 3)) == 11)
+    assert!(expect_candidate(scalar_candidate_at(0, 13, 4)) == 12)
+    assert!(scalar_candidate_at(0, 13, 5).is_none())
+
+    assert!(expect_candidate(scalar_candidate_at(5, 2, 0)) == 5)
+    assert!(expect_candidate(scalar_candidate_at(5, 2, 1)) == 4)
+    assert!(expect_candidate(scalar_candidate_at(5, 2, 2)) == 3)
+    assert!(scalar_candidate_at(5, 2, 3).is_none())
+}
+
+#[test]
+fn scalar_cursor_is_empty_at_origin_and_strictly_reduces_rank() {
+    let empty = scalar_shrink_next(scalar_shrink_start(9, 9))
+    match empty {
+        ScalarShrinkStep::Done => {},
+        ScalarShrinkStep::Candidate { value: _, cursor: _ } => assert!(false),
+    }
+
+    let first = scalar_shrink_next(scalar_shrink_start(5, 2))
+    match first {
+        ScalarShrinkStep::Done => assert!(false),
+        ScalarShrinkStep::Candidate { value, cursor: _ } => {
+            assert!(value == 5)
+            assert!(scalar_rank(5, value) < scalar_rank(5, 2))
+        },
+    }
 }

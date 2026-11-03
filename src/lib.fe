@@ -1,7 +1,10 @@
-/// FeCheck is a deterministic property-testing and shrinking toolkit for Fe.
+pub use outcome::*
+pub use scalar::*
+
+/// Version of FeCheck's public deterministic format.
 pub const FECHECK_FORMAT_VERSION: u256 = 1
 
-/// Baseline function used only to prove the clean contest scaffold builds.
+/// Baseline function retained as a minimal public smoke test.
 pub fn identity(_ value: u256) -> u256 {
     value
 }
