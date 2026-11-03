@@ -1,0 +1,6 @@
+[ingot]
+name = "fecheck_accounting_ledger_demo"
+version = "0.1.0"
+
+[dependencies]
+fecheck = { path = "../.." }

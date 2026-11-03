@@ -1,0 +1,146 @@
+use super::action::{LedgerAction, LedgerActor, same_actor}
+
+pub struct LedgerModel { pub balance_a: u256, pub balance_b: u256, pub total_shares: u256 }
+
+impl Copy for LedgerModel {}
+
+pub enum LedgerPreview {
+    Discard,
+    Ready {
+        pub predicted_next: LedgerModel,
+    },
+}
+
+impl Copy for LedgerPreview {}
+
+pub fn empty_ledger_model() -> LedgerModel {
+    LedgerModel { balance_a: 0, balance_b: 0, total_shares: 0 }
+}
+
+pub fn ledger_model_equal(_ left: LedgerModel, _ right: LedgerModel) -> bool {
+    left.balance_a == right.balance_a
+        && left.balance_b == right.balance_b
+        && left.total_shares == right.total_shares
+}
+
+pub fn model_balance(_ model: LedgerModel, _ actor: LedgerActor) -> u256 {
+    match actor {
+        LedgerActor::A => model.balance_a,
+        LedgerActor::B => model.balance_b,
+    }
+}
+
+fn set_model_balance(_ model: LedgerModel, _ actor: LedgerActor, _ value: u256) -> LedgerModel {
+    var next = model
+    match actor {
+        LedgerActor::A => next.balance_a = value,
+        LedgerActor::B => next.balance_b = value,
+    }
+    next
+}
+
+fn can_add(_ left: u256, _ right: u256) -> bool {
+    left <= u256::max() - right
+}
+
+/// Pure model transition. It never mutates the input model or the EVM.
+pub fn preview_ledger_action(_ model: LedgerModel, _ action: LedgerAction) -> LedgerPreview {
+    match action {
+        LedgerAction::Deposit { actor, amount } => {
+            if amount == 0 {
+                return LedgerPreview::Discard
+            }
+            let prior = model_balance(model, actor)
+            if !can_add(prior, amount) || !can_add(model.total_shares, amount) {
+                return LedgerPreview::Discard
+            }
+            var next = set_model_balance(model, actor, prior + amount)
+            next.total_shares += amount
+            LedgerPreview::Ready { predicted_next: next }
+        },
+        LedgerAction::Transfer { from, to, amount } => {
+            if amount == 0 {
+                return LedgerPreview::Discard
+            }
+            let source = model_balance(model, from)
+            if source < amount {
+                return LedgerPreview::Discard
+            }
+            if same_actor(from, to) {
+                return LedgerPreview::Ready { predicted_next: model }
+            }
+            let destination = model_balance(model, to)
+            if !can_add(destination, amount) {
+                return LedgerPreview::Discard
+            }
+            let debited = set_model_balance(model, from, source - amount)
+            LedgerPreview::Ready {
+                predicted_next: set_model_balance(debited, to, destination + amount),
+            }
+        },
+    }
+}
+
+fn expect_ready(_ preview: LedgerPreview) -> LedgerModel {
+    match preview {
+        LedgerPreview::Ready { predicted_next } => predicted_next,
+        LedgerPreview::Discard => {
+            assert!(false)
+            empty_ledger_model()
+        },
+    }
+}
+
+#[test]
+fn deposits_and_cross_transfers_update_the_pure_model() {
+    let empty = empty_ledger_model()
+    let funded = expect_ready(
+        preview_ledger_action(
+            empty,
+            LedgerAction::Deposit { actor: LedgerActor::A, amount: 2 },
+        ),
+    )
+    assert!(funded.balance_a == 2)
+    assert!(funded.balance_b == 0)
+    assert!(funded.total_shares == 2)
+    let moved = expect_ready(
+        preview_ledger_action(
+            funded,
+            LedgerAction::Transfer { from: LedgerActor::A, to: LedgerActor::B, amount: 1 },
+        ),
+    )
+    assert!(moved.balance_a == 1)
+    assert!(moved.balance_b == 1)
+    assert!(moved.total_shares == 2)
+}
+
+#[test]
+fn a_valid_self_transfer_is_an_explicit_no_op() {
+    let model = LedgerModel { balance_a: 1, balance_b: 0, total_shares: 1 }
+    let next = expect_ready(
+        preview_ledger_action(
+            model,
+            LedgerAction::Transfer { from: LedgerActor::A, to: LedgerActor::A, amount: 1 },
+        ),
+    )
+    assert!(ledger_model_equal(model, next))
+}
+
+#[test]
+fn zero_and_insufficient_actions_are_discarded() {
+    let empty = empty_ledger_model()
+    match preview_ledger_action(
+        empty,
+        LedgerAction::Deposit { actor: LedgerActor::A, amount: 0 },
+    ) {
+        LedgerPreview::Discard => {},
+        _ => assert!(false),
+    }
+    match preview_ledger_action(
+        empty,
+        LedgerAction::Transfer { from: LedgerActor::A, to: LedgerActor::B, amount: 1 },
+    ) {
+        LedgerPreview::Discard => {},
+        _ => assert!(false),
+    }
+}

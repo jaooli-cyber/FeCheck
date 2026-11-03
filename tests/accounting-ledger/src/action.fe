@@ -1,0 +1,170 @@
+pub const LEDGER_ACTION_MIN_V1: u256 = 0
+pub const LEDGER_ACTION_MAX_V1: u256 = 30
+pub const LEDGER_ACTION_ORIGIN_V1: u256 = 1
+
+pub enum LedgerActor {
+    A,
+    B,
+}
+
+impl Copy for LedgerActor {}
+
+pub enum LedgerAction {
+    Deposit {
+        pub actor: LedgerActor,
+        pub amount: u256,
+    },
+    Transfer {
+        pub from: LedgerActor,
+        pub to: LedgerActor,
+        pub amount: u256,
+    },
+}
+
+impl Copy for LedgerAction {}
+
+fn actor_from_bit(_ bit: u256) -> LedgerActor {
+    if bit == 0 {
+        LedgerActor::A
+    } else {
+        LedgerActor::B
+    }
+}
+
+fn actor_bit(_ actor: LedgerActor) -> u256 {
+    match actor {
+        LedgerActor::A => 0,
+        LedgerActor::B => 1,
+    }
+}
+
+pub fn same_actor(_ left: LedgerActor, _ right: LedgerActor) -> bool {
+    match left {
+        LedgerActor::A => match right {
+            LedgerActor::A => true,
+            LedgerActor::B => false,
+        },
+        LedgerActor::B => match right {
+            LedgerActor::A => false,
+            LedgerActor::B => true,
+        },
+    }
+}
+
+/// Packed V1 decoder.
+///
+/// bits 0..1: amount, bit 2: actor/from, bit 3: to, bit 4: kind.
+/// Deposits with `to = 1`, amount `3`, and words above 30 are non-canonical.
+pub fn decode_ledger_action_v1(_ word: u256) -> Option<LedgerAction> {
+    if word > LEDGER_ACTION_MAX_V1 {
+        return Option::None
+    }
+    let amount = word % 4
+    if amount == 3 {
+        return Option::None
+    }
+    if word < 16 {
+        if word >= 8 {
+            return Option::None
+        }
+        return Option::Some(
+            LedgerAction::Deposit { actor: actor_from_bit((word / 4) % 2), amount },
+        )
+    }
+    Option::Some(
+        LedgerAction::Transfer {
+            from: actor_from_bit((word / 4) % 2),
+            to: actor_from_bit((word / 8) % 2),
+            amount,
+        },
+    )
+}
+
+pub fn encode_ledger_action_v1(_ action: LedgerAction) -> Option<u256> {
+    let amount = match action {
+        LedgerAction::Deposit { actor: _, amount } => amount,
+        LedgerAction::Transfer { from: _, to: _, amount } => amount,
+    }
+    if amount > 2 {
+        return Option::None
+    }
+    Option::Some(
+        match action {
+            LedgerAction::Deposit { actor, amount } => actor_bit(actor) * 4 + amount,
+            LedgerAction::Transfer { from, to, amount } => {
+                16 + actor_bit(from) * 4 + actor_bit(to) * 8 + amount
+            },
+        },
+    )
+}
+
+#[test]
+fn packed_v1_has_eighteen_canonical_and_thirteen_reserved_words() {
+    var canonical: u256 = 0
+    var reserved: u256 = 0
+    var word: u256 = 0
+    while word <= LEDGER_ACTION_MAX_V1 {
+        match decode_ledger_action_v1(word) {
+            Option::Some(action) => {
+                canonical += 1
+                assert!(encode_ledger_action_v1(action).unwrap() == word)
+            },
+            Option::None => reserved += 1,
+        }
+        word += 1
+    }
+    assert!(canonical == 18)
+    assert!(reserved == 13)
+    assert!(decode_ledger_action_v1(31).is_none())
+    assert!(decode_ledger_action_v1(u256::max()).is_none())
+}
+
+#[test]
+fn packed_v1_encoder_rejects_noncanonical_amounts() {
+    assert!(
+        encode_ledger_action_v1(LedgerAction::Deposit { actor: LedgerActor::A, amount: 3 })
+            .is_none(),
+    )
+    assert!(
+        encode_ledger_action_v1(
+            LedgerAction::Transfer { from: LedgerActor::A, to: LedgerActor::B, amount: 3 },
+        )
+            .is_none(),
+    )
+    assert!(
+        encode_ledger_action_v1(
+            LedgerAction::Deposit { actor: LedgerActor::B, amount: u256::max() },
+        )
+            .is_none(),
+    )
+}
+
+#[test]
+fn packed_v1_decodes_the_named_witnesses() {
+    match decode_ledger_action_v1(1) {
+        Option::Some(LedgerAction::Deposit { actor, amount }) => {
+            assert!(same_actor(actor, LedgerActor::A))
+            assert!(amount == 1)
+        },
+        _ => assert!(false),
+    }
+    match decode_ledger_action_v1(17) {
+        Option::Some(LedgerAction::Transfer { from, to, amount }) => {
+            assert!(same_actor(from, LedgerActor::A))
+            assert!(same_actor(to, LedgerActor::A))
+            assert!(amount == 1)
+        },
+        _ => assert!(false),
+    }
+    match decode_ledger_action_v1(25) {
+        Option::Some(LedgerAction::Transfer { from, to, amount }) => {
+            assert!(same_actor(from, LedgerActor::A))
+            assert!(same_actor(to, LedgerActor::B))
+            assert!(amount == 1)
+        },
+        _ => assert!(false),
+    }
+    assert!(decode_ledger_action_v1(3).is_none())
+    assert!(decode_ledger_action_v1(9).is_none())
+    assert!(decode_ledger_action_v1(19).is_none())
+}

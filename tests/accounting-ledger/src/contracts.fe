@@ -1,0 +1,113 @@
+use std::evm::{Address, Call, Ctx, StorageMap}
+
+pub msg AccountingLedgerMsg {
+    #[selector = 0x4c454401]
+    Deposit { amount: u256 },
+    #[selector = 0x4c454402]
+    Transfer { to: Address, amount: u256 },
+    #[selector = 0x4c454403]
+    Balance { owner: Address } -> u256,
+    #[selector = 0x4c454404]
+    TotalShares -> u256,
+}
+
+pub msg LedgerActorMsg {
+    #[selector = 0x4c454410]
+    Deposit { amount: u256 },
+    #[selector = 0x4c454411]
+    Transfer { to: Address, amount: u256 },
+    #[selector = 0x4c454412]
+    BoundTarget -> Address,
+}
+
+struct LedgerStore { total_shares: u256, balances: StorageMap<Address, u256> }
+
+/// Deliberately faulty accounting target: both balances are read before
+/// either write, so a self-transfer's credit overwrites its debit.
+pub contract AccountingLedgerBuggy uses (ctx: Ctx) {
+    mut store: LedgerStore,
+
+    recv AccountingLedgerMsg {
+        Deposit { amount } uses (mut store, ctx) {
+            let sender = ctx.caller()
+            let balance = store.balances.get(key: sender)
+            store.balances.set(key: sender, value: balance + amount)
+            store.total_shares += amount
+        }
+        Transfer { to, amount } uses (mut store, ctx) {
+            let sender = ctx.caller()
+            let source_before = store.balances.get(key: sender)
+            let destination_before = store.balances.get(key: to)
+            assert!(source_before >= amount, "balance")
+            store.balances.set(key: sender, value: source_before - amount)
+            store.balances.set(key: to, value: destination_before + amount)
+        }
+        Balance { owner } -> u256 uses store {
+            store.balances.get(key: owner)
+        }
+        TotalShares -> u256 uses store {
+            store.total_shares
+        }
+    }
+}
+
+/// Corrected target with identical ABI and storage layout.
+pub contract AccountingLedgerFixed uses (ctx: Ctx) {
+    mut store: LedgerStore,
+
+    recv AccountingLedgerMsg {
+        Deposit { amount } uses (mut store, ctx) {
+            let sender = ctx.caller()
+            let balance = store.balances.get(key: sender)
+            store.balances.set(key: sender, value: balance + amount)
+            store.total_shares += amount
+        }
+        Transfer { to, amount } uses (mut store, ctx) {
+            let sender = ctx.caller()
+            let source_before = store.balances.get(key: sender)
+            assert!(source_before >= amount, "balance")
+            if sender == to { return }
+            let destination_before = store.balances.get(key: to)
+            store.balances.set(key: sender, value: source_before - amount)
+            store.balances.set(key: to, value: destination_before + amount)
+        }
+        Balance { owner } -> u256 uses store {
+            store.balances.get(key: owner)
+        }
+        TotalShares -> u256 uses store {
+            store.total_shares
+        }
+    }
+}
+
+struct LedgerActorStore { target: Address }
+
+/// Actor identity proxy. Its normal CALL makes the proxy address the target's
+/// `ctx.caller()` and deliberately bubbles target reverts.
+pub contract LedgerActorProxy uses (call: mut Call) {
+    mut store: LedgerActorStore,
+
+    init(target: Address) uses (mut store) { store.target = target }
+
+    recv LedgerActorMsg {
+        Deposit { amount } uses (store, mut call) {
+            call.call(
+                addr: store.target,
+                gas: 200000,
+                value: Wei::zero(),
+                message: AccountingLedgerMsg::Deposit { amount },
+            )
+        }
+        Transfer { to, amount } uses (store, mut call) {
+            call.call(
+                addr: store.target,
+                gas: 200000,
+                value: Wei::zero(),
+                message: AccountingLedgerMsg::Transfer { to, amount },
+            )
+        }
+        BoundTarget -> Address uses store {
+            store.target
+        }
+    }
+}
