@@ -118,7 +118,7 @@ pub struct StatefulAdapterIdentityV1 {
     pub failure_schema_fingerprint: u256,
     pub adapter_logic_fingerprint: u256,
     pub target_init_code_hash: u256,
-    pub actor_init_code_hash: u256,
+    pub actor_init_code_template_hash: u256,
     pub target_runtime_code_hash: u256,
     pub actor_runtime_code_hash: u256,
     pub source_bundle_fingerprint: u256,
@@ -151,7 +151,7 @@ pub fn stateful_adapter_fingerprint_v1(_ identity: StatefulAdapterIdentityV1) ->
             identity.failure_schema_fingerprint,
             identity.adapter_logic_fingerprint,
             identity.target_init_code_hash,
-            identity.actor_init_code_hash,
+            identity.actor_init_code_template_hash,
             identity.target_runtime_code_hash,
             identity.actor_runtime_code_hash,
             identity.source_bundle_fingerprint,
@@ -202,6 +202,8 @@ pub fn stateful_fixture_evidence_fingerprint_v1(
     _ target_address: u256,
     _ actor_a_address: u256,
     _ actor_b_address: u256,
+    _ actor_a_init_code_hash: u256,
+    _ actor_b_init_code_hash: u256,
     _ observed_target_runtime_hash: u256,
     _ observed_actor_a_runtime_hash: u256,
     _ observed_actor_b_runtime_hash: u256,
@@ -213,6 +215,8 @@ pub fn stateful_fixture_evidence_fingerprint_v1(
             target_address,
             actor_a_address,
             actor_b_address,
+            actor_a_init_code_hash,
+            actor_b_init_code_hash,
             observed_target_runtime_hash,
             observed_actor_a_runtime_hash,
             observed_actor_b_runtime_hash,
@@ -639,7 +643,7 @@ pub fn stateful_bound_capsule_digest_v1(_ capsule: StatefulBoundReplayCapsuleV1)
 }
 
 pub struct StatefulReplayRegistry {
-    capsule_digests: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+    suite_ids: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
     replay_namespaces: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
     len: usize,
 }
@@ -648,7 +652,7 @@ impl Copy for StatefulReplayRegistry {}
 
 pub fn stateful_replay_registry_empty() -> StatefulReplayRegistry {
     StatefulReplayRegistry {
-        capsule_digests: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+        suite_ids: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
         replay_namespaces: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
         len: 0,
     }
@@ -660,12 +664,12 @@ pub fn stateful_replay_registry_len(_ registry: StatefulReplayRegistry) -> usize
 
 pub fn stateful_replay_registry_contains(
     _ registry: StatefulReplayRegistry,
-    _ capsule_digest: u256,
+    _ suite_id: u256,
     _ replay_namespace: u256,
 ) -> bool {
     var index: usize = 0
     while index < registry.len {
-        if registry.capsule_digests[index] == capsule_digest
+        if registry.suite_ids[index] == suite_id
             && registry.replay_namespaces[index] == replay_namespace {
             return true
         }
@@ -688,10 +692,10 @@ impl Copy for StatefulReplayRegistryClaim {}
 
 pub fn stateful_replay_registry_claim(
     _ registry: StatefulReplayRegistry,
-    _ capsule_digest: u256,
+    _ suite_id: u256,
     _ replay_namespace: u256,
 ) -> StatefulReplayRegistryClaim {
-    if stateful_replay_registry_contains(registry, capsule_digest, replay_namespace) {
+    if stateful_replay_registry_contains(registry, suite_id, replay_namespace) {
         return StatefulReplayRegistryClaim::Rejected {
             error: ErrorCode { kind: ERROR_STATEFUL_REPLAY_DUPLICATE, detail: replay_namespace },
             registry,
@@ -707,7 +711,7 @@ pub fn stateful_replay_registry_claim(
         }
     }
     var claimed = registry
-    claimed.capsule_digests[claimed.len] = capsule_digest
+    claimed.suite_ids[claimed.len] = suite_id
     claimed.replay_namespaces[claimed.len] = replay_namespace
     claimed.len += 1
     StatefulReplayRegistryClaim::Claimed { registry: claimed }
@@ -852,6 +856,7 @@ uses (P::E, X::E)
         bound_run,
         original_execution,
         config.namespace,
+        Option::None,
         preflight,
         evaluate,
         verifier,
@@ -977,9 +982,10 @@ fn shrink_status_equal(_ left: ShrinkStatus, _ right: ShrinkStatus) -> bool {
     shrink_status_tag(left) == shrink_status_tag(right)
 }
 
-/// Repeats the complete attempt prefix, failing attempt, and shrink path in a
+/// Repeats the complete attempt prefix through the historical attempt in a
 /// fresh execution namespace, then compares every recorded statistic and
-/// digest. The original RunConfig is never rewritten.
+/// digest. A terminal earlier divergence stops immediately and no later
+/// attempt is evaluated. The original RunConfig is never rewritten.
 pub fn recheck_u256_action_seq_stateful_bound_v1<
     const N: usize,
     P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
@@ -1193,7 +1199,7 @@ uses (P::E, X::E)
     let capsule_digest = capsule.capsule_digest
     let proposed_registry = match stateful_replay_registry_claim(
         registry,
-        capsule_digest,
+        config.suite_id,
         replay_namespace,
     ) {
         StatefulReplayRegistryClaim::Claimed { registry } => registry,
@@ -1215,6 +1221,7 @@ uses (P::E, X::E)
         expected_bound,
         replay_execution,
         replay_namespace,
+        Option::Some(capsule.attempt_index),
         preflight,
         evaluate,
         verifier,

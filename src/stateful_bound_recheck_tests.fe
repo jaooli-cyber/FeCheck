@@ -83,6 +83,8 @@ const MODE_PREFLIGHT_ERROR: u256 = 1
 const MODE_CROSSED_RECEIPT: u256 = 2
 const MODE_WRONG_ADAPTER: u256 = 3
 const MODE_PASS_ALL: u256 = 4
+const MODE_FAIL_ALL: u256 = 5
+const MODE_DISCARD_SHORT: u256 = 6
 const ERROR_TEST_PREFLIGHT: u256 = 970
 
 struct BoundAudit {
@@ -94,6 +96,8 @@ struct BoundAudit {
     first_execution_namespace: u256,
     first_fixture_domain: u256,
     first_attempt: u256,
+    last_preflight_attempt: u256,
+    last_evaluation_attempt: u256,
 }
 
 fn empty_audit(_ mode: u256) -> BoundAudit {
@@ -106,6 +110,8 @@ fn empty_audit(_ mode: u256) -> BoundAudit {
         first_execution_namespace: 0,
         first_fixture_domain: 0,
         first_attempt: 0,
+        last_preflight_attempt: 0,
+        last_evaluation_attempt: 0,
     }
 }
 
@@ -140,7 +146,7 @@ fn identity_with_policy(_ policy: u256) -> StatefulAdapterIdentityV1 {
         failure_schema_fingerprint: 104,
         adapter_logic_fingerprint: 105,
         target_init_code_hash: 106,
-        actor_init_code_hash: 107,
+        actor_init_code_template_hash: 107,
         target_runtime_code_hash: 108,
         actor_runtime_code_hash: 109,
         source_bundle_fingerprint: 110,
@@ -161,6 +167,8 @@ fn fixture_evidence(
         stateful_fixture_salt(request.context, FixtureRole::Target),
         stateful_fixture_salt(request.context, FixtureRole::ActorA),
         stateful_fixture_salt(request.context, FixtureRole::ActorB),
+        112,
+        113,
         identity.target_runtime_code_hash,
         identity.actor_runtime_code_hash,
         identity.actor_runtime_code_hash,
@@ -177,6 +185,7 @@ uses (audit: mut BoundAudit)
         audit.first_fixture_domain = request.context.fixture_domain
         audit.first_attempt = request.context.attempt_index
     }
+    audit.last_preflight_attempt = request.context.attempt_index
     audit.preflight_count += 1
     if audit.mode == MODE_PREFLIGHT_ERROR {
         return StatefulFixturePreflight::InfrastructureError {
@@ -189,6 +198,7 @@ uses (audit: mut BoundAudit)
 fn audited_evaluate(_ request: StatefulActionSeqRequest<3>) -> StatefulBoundEvaluationReceipt
 uses (audit: mut BoundAudit)
 {
+    audit.last_evaluation_attempt = request.context.attempt_index
     audit.evaluation_count += 1
     let id = identity()
     let adapter = stateful_adapter_fingerprint_v1(id)
@@ -199,7 +209,11 @@ uses (audit: mut BoundAudit)
     }
 
     let len = action_seq_len(request.value) as u256
-    let verdict = if audit.mode == MODE_PASS_ALL || len < 2 {
+    let verdict = if audit.mode == MODE_FAIL_ALL {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else if audit.mode == MODE_DISCARD_SHORT && len < 2 {
+        PropertyVerdict::Discard
+    } else if audit.mode == MODE_PASS_ALL || len < 2 {
         PropertyVerdict::Pass
     } else {
         PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
@@ -230,13 +244,17 @@ uses (audit: mut BoundAudit)
     receipt
 }
 
-fn produce_capsule() -> StatefulBoundReplayCapsuleV1 {
-    var audit = empty_audit(MODE_NORMAL)
+fn produce_capsule_for_mode(
+    _ master_seed: u256,
+    _ run_config: RunConfig,
+    _ mode: u256,
+) -> StatefulBoundReplayCapsuleV1 {
+    var audit = empty_audit(mode)
     let report = with (BoundAudit = mut audit) {
         check_u256_action_seq_stateful_bound_v1(
             strategy(),
-            7,
-            config(),
+            master_seed,
+            run_config,
             stateful_run_registry_empty(),
             identity(),
             audited_preflight,
@@ -250,6 +268,17 @@ fn produce_capsule() -> StatefulBoundReplayCapsuleV1 {
             empty_capsule()
         },
     }
+}
+
+fn produce_capsule_for(
+    _ master_seed: u256,
+    _ run_config: RunConfig,
+) -> StatefulBoundReplayCapsuleV1 {
+    produce_capsule_for_mode(master_seed, run_config, MODE_NORMAL)
+}
+
+fn produce_capsule() -> StatefulBoundReplayCapsuleV1 {
+    produce_capsule_for(7, config())
 }
 
 fn empty_capsule() -> StatefulBoundReplayCapsuleV1 {
@@ -620,12 +649,14 @@ fn replay_registry_adoption_is_transactional_and_duplicate_precedes_callbacks() 
         )
     }
     assert!(stateful_replay_registry_len(first.registry) == 1)
+    let second_capsule = produce_capsule_for(8, config())
+    assert!(second_capsule.capsule_digest != capsule.capsule_digest)
     var duplicate_audit = empty_audit(MODE_NORMAL)
     let duplicate = with (BoundAudit = mut duplicate_audit) {
         recheck_u256_action_seq_stateful_bound_v1(
             strategy(),
             config(),
-            capsule,
+            second_capsule,
             identity(),
             99,
             first.registry,
@@ -711,6 +742,66 @@ fn replay_registry_adoption_is_transactional_and_duplicate_precedes_callbacks() 
     assert_incompatible(full.outcome, ERROR_STATEFUL_REPLAY_REGISTRY_FULL)
     assert!(full_audit.preflight_count == 0)
     assert!(full_audit.evaluation_count == 0)
+}
+
+#[test]
+fn full_recheck_never_evaluates_after_the_historical_attempt() {
+    var historical_config = config()
+    historical_config.target_valid_cases = 1
+    historical_config.max_discards = 2
+    let capsule = produce_capsule_for_mode(7, historical_config, MODE_DISCARD_SHORT)
+    assert!(
+        capsule.attempt_index + 1 > historical_config.target_valid_cases,
+    )
+
+    var pass_audit = empty_audit(MODE_PASS_ALL)
+    let not_observed = with (BoundAudit = mut pass_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            historical_config,
+            capsule,
+            identity(),
+            103,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match not_observed.outcome {
+        StatefulBoundRecheckOutcome::FailureNotObserved => {},
+        _ => assert!(false),
+    }
+    assert!(pass_audit.preflight_count == capsule.attempt_index + 1)
+    assert!(pass_audit.evaluation_count == capsule.attempt_index + 1)
+    assert!(pass_audit.last_preflight_attempt == capsule.attempt_index)
+    assert!(
+        pass_audit.last_evaluation_attempt == capsule.attempt_index,
+    )
+
+    var early_audit = empty_audit(MODE_FAIL_ALL)
+    let early_failure = with (BoundAudit = mut early_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            historical_config,
+            capsule,
+            identity(),
+            104,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match early_failure.outcome {
+        StatefulBoundRecheckOutcome::EvidenceMismatch { field } => {
+            assert!(field == STATEFUL_EVIDENCE_RUN_STATS)
+        },
+        _ => assert!(false),
+    }
+    assert!(early_audit.preflight_count == 1)
+    assert!(early_audit.evaluation_count == 1)
+    assert!(
+        early_audit.last_evaluation_attempt < capsule.attempt_index,
+    )
 }
 
 #[test]
@@ -1033,12 +1124,22 @@ fn identity_policy_fixture_evidence_and_execution_domains_are_independent() {
         replay_execution != stateful_replay_execution_fingerprint_v1(first_bound, 99, 43),
     )
 
-    let evidence = stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 108, 109, 109)
+    let evidence = stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 201, 202, 108, 109, 109)
     assert!(
-        evidence != stateful_fixture_evidence_fingerprint_v1(first, 4, 2, 3, 108, 109, 109),
+        evidence
+            != stateful_fixture_evidence_fingerprint_v1(first, 4, 2, 3, 201, 202, 108, 109, 109),
     )
     assert!(
-        evidence != stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 999, 109, 109),
+        evidence
+            != stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 999, 202, 108, 109, 109),
+    )
+    assert!(
+        evidence
+            != stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 201, 999, 108, 109, 109),
+    )
+    assert!(
+        evidence
+            != stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 201, 202, 999, 109, 109),
     )
 }
 

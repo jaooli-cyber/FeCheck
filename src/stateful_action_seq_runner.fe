@@ -183,6 +183,17 @@ fn stateful_action_seq_infrastructure_error<const N: usize>(
     stateful_action_seq_report(RunOutcome::InfrastructureError { error, stats }, registry)
 }
 
+fn stateful_should_evaluate_original_attempt(
+    _ stats: RunStats,
+    _ config: RunConfig,
+    _ attempt_ceiling: Option<u256>,
+) -> bool {
+    match attempt_ceiling {
+        Option::Some(last_attempt_index) => stats.attempts <= last_attempt_index,
+        Option::None => stats.valid_cases < config.target_valid_cases,
+    }
+}
+
 fn stateful_shrink_infrastructure<const N: usize>(
     _ error: ErrorCode,
     _ stats: RunStats,
@@ -467,7 +478,9 @@ uses (P::E, X::E, V::E)
 ///
 /// Generation and capsule validation remain bound to `config` and
 /// `semantic_run_fingerprint`. `fixture_domain` and `execution_namespace`
-/// govern only fixture salts and the caller-owned registry claim.
+/// govern only fixture salts and the caller-owned registry claim. When an
+/// attempt ceiling is present, the scheduler evaluates exactly through that
+/// historical attempt unless a failure or infrastructure error stops it.
 pub(ingot) fn check_u256_action_seq_stateful_with_execution<
     const N: usize,
     R: Copy,
@@ -482,6 +495,7 @@ pub(ingot) fn check_u256_action_seq_stateful_with_execution<
     _ semantic_run_fingerprint: u256,
     _ fixture_domain: u256,
     _ execution_namespace: u256,
+    _ attempt_ceiling: Option<u256>,
     _ preflight: P,
     _ evaluate: X,
     _ verify: V,
@@ -525,7 +539,7 @@ uses (P::E, X::E, V::E)
     var active_registry = registry
 
     let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
-    while stats.valid_cases < config.target_valid_cases {
+    while stateful_should_evaluate_original_attempt(stats, config, attempt_ceiling) {
         let attempt_index = stats.attempts
         let value = match generate_u256_action_seq_attempt(
             strategy,
@@ -586,10 +600,18 @@ uses (P::E, X::E, V::E)
             PropertyVerdict::Discard => {
                 stats.discards += 1
                 if stats.discards > config.max_discards {
-                    return stateful_action_seq_report(
-                        RunOutcome::Exhausted { reason: ExhaustionReason::MaxDiscards, stats },
-                        active_registry,
-                    )
+                    match attempt_ceiling {
+                        Option::Some(_) => {},
+                        Option::None => {
+                            return stateful_action_seq_report(
+                                RunOutcome::Exhausted {
+                                    reason: ExhaustionReason::MaxDiscards,
+                                    stats,
+                                },
+                                active_registry,
+                            )
+                        },
+                    }
                 }
             },
             PropertyVerdict::InfrastructureError(error) => {
@@ -680,6 +702,7 @@ uses (P::E, X::E)
         run_id,
         run_id,
         config.namespace,
+        Option::None,
         preflight,
         evaluate,
         accept_experimental_receipt,
