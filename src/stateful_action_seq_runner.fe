@@ -1,0 +1,611 @@
+use super::action_seq::{
+    ActionSeq,
+    U256ActionSeqShrinkStep,
+    U256ActionSeqStrategy,
+    action_seq_len,
+    action_seq_u256_descriptor,
+    generate_u256_action_seq_attempt,
+    u256_action_seq_contains,
+    u256_action_seq_fingerprint,
+    u256_action_seq_rank_less,
+    u256_action_seq_shrink_next,
+    u256_action_seq_shrink_start,
+    u256_action_seq_validate,
+}
+use super::codec::action_seq_u256_codec_fingerprint
+use super::outcome::{
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::pure_runner::{
+    ERROR_INVALID_SHRINK_CANDIDATE,
+    empty_run_stats,
+    empty_shrink_stats,
+    validate_run_config_for_codec,
+}
+use super::replay::{RunConfig, generation_fingerprint, run_fingerprint}
+use super::stateful::{
+    ERROR_STATEFUL_ACCOUNTING_MISMATCH,
+    StatefulAdmission,
+    StatefulEvaluationContext,
+    StatefulFixturePlan,
+    StatefulRunRegistry,
+    StatefulRunRegistryClaim,
+    admit_stateful_evaluation,
+    stateful_run_registry_claim,
+    validate_stateful_fixture_plan,
+}
+use super::strategy::GenerationResult
+
+/// Exact Target/ActorA/ActorB deployment count of the experimental P0 runner.
+pub const STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1: u256 = 3
+
+pub const ERROR_STATEFUL_ACTIONS_EXCEED_SEQUENCE: u256 = 507
+pub const ERROR_STATEFUL_PASS_INCOMPLETE_ACTIONS: u256 = 508
+
+/// Pre-deployment request. The preflight callback deliberately cannot inspect
+/// the generated action sequence.
+pub struct StatefulFixtureRequest { pub context: StatefulEvaluationContext }
+
+impl Copy for StatefulFixtureRequest {}
+
+/// One scheduler-owned stateful property request.
+pub struct StatefulActionSeqRequest<const N: usize> {
+    pub value: ActionSeq<u256, N>,
+    pub context: StatefulEvaluationContext,
+}
+
+impl<const N: usize> Copy for StatefulActionSeqRequest<N> {}
+
+/// Result of the adapter's observational, non-mutating address preflight.
+///
+/// Read-only behavior is an adapter obligation. Fe's effect row forwards the
+/// EVM capability but cannot enforce that obligation, which is one reason the
+/// runner is explicitly experimental rather than certified.
+pub enum StatefulFixturePreflight {
+    Ready,
+    InfrastructureError { pub error: ErrorCode },
+}
+
+impl Copy for StatefulFixturePreflight {}
+
+/// Result returned after one fresh P0 fixture has been exercised.
+///
+/// Returning from the evaluator is an adapter assertion that all three typed
+/// CREATE2 deployments completed. A direct deployment revert escapes the
+/// outer evaluation and therefore produces no structured receipt.
+pub struct StatefulEvaluationReceipt { pub verdict: PropertyVerdict, pub actions_executed: u256 }
+
+impl Copy for StatefulEvaluationReceipt {}
+
+/// Structured outcome plus the caller-owned namespace registry.
+pub struct StatefulActionSeqRunReport<const N: usize> {
+    pub outcome: RunOutcome<ActionSeq<u256, N>>,
+    pub registry: StatefulRunRegistry,
+}
+
+impl<const N: usize> Copy for StatefulActionSeqRunReport<N> {}
+
+enum StatefulEvaluationPhase {
+    Original,
+    Shrink,
+}
+
+impl Copy for StatefulEvaluationPhase {}
+
+enum StatefulEvaluationStep {
+    Evaluated {
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+        pub verdict: PropertyVerdict,
+    },
+    InfrastructureError {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+        pub claim_committed: bool,
+    },
+}
+
+impl Copy for StatefulEvaluationStep {}
+
+enum StatefulU256ActionSeqShrinkResult<const N: usize> {
+    Complete {
+        pub minimal: ActionSeq<u256, N>,
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+        pub status: ShrinkStatus,
+    },
+    InfrastructureError {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+    },
+}
+
+impl<const N: usize> Copy for StatefulU256ActionSeqShrinkResult<N> {}
+
+fn p0_fixture_plan() -> StatefulFixturePlan {
+    StatefulFixturePlan { deployments_per_evaluation: STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 }
+}
+
+fn action_seq_descriptor_or_zero<const N: usize>(_ value: ActionSeq<u256, N>) -> u256 {
+    match action_seq_u256_descriptor(value) {
+        Result::Ok(descriptor) => descriptor,
+        Result::Err(_) => 0,
+    }
+}
+
+fn stateful_action_seq_report<const N: usize>(
+    _ outcome: RunOutcome<ActionSeq<u256, N>>,
+    _ registry: StatefulRunRegistry,
+) -> StatefulActionSeqRunReport<N> {
+    StatefulActionSeqRunReport { outcome, registry }
+}
+
+fn stateful_action_seq_configuration_error<const N: usize>(
+    _ error: ErrorCode,
+    _ registry: StatefulRunRegistry,
+) -> StatefulActionSeqRunReport<N> {
+    stateful_action_seq_report(
+        RunOutcome::ConfigurationError { error, stats: empty_run_stats() },
+        registry,
+    )
+}
+
+fn stateful_action_seq_infrastructure_error<const N: usize>(
+    _ error: ErrorCode,
+    _ stats: RunStats,
+    _ registry: StatefulRunRegistry,
+) -> StatefulActionSeqRunReport<N> {
+    stateful_action_seq_report(RunOutcome::InfrastructureError { error, stats }, registry)
+}
+
+fn stateful_shrink_infrastructure<const N: usize>(
+    _ error: ErrorCode,
+    _ stats: RunStats,
+    _ shrink: ShrinkStats,
+) -> StatefulU256ActionSeqShrinkResult<N> {
+    StatefulU256ActionSeqShrinkResult::InfrastructureError { error, stats, shrink }
+}
+
+fn evaluate_stateful_once<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+>(
+    _ config: RunConfig,
+    _ value: ActionSeq<u256, N>,
+    _ context: StatefulEvaluationContext,
+    _ phase: StatefulEvaluationPhase,
+    _ prior_stats: RunStats,
+    _ prior_shrink: ShrinkStats,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulEvaluationStep
+uses (P::E, X::E)
+{
+    var proposal_stats = prior_stats
+    var required_deployments: u256 = 0
+    match admit_stateful_evaluation(config, p0_fixture_plan(), prior_stats) {
+        StatefulAdmission::Admitted { stats, required_deployments: required } => {
+            proposal_stats = stats
+            required_deployments = required
+        },
+        StatefulAdmission::Rejected { error, stats } => {
+            return StatefulEvaluationStep::InfrastructureError {
+                error,
+                stats,
+                shrink: prior_shrink,
+                claim_committed: false,
+            }
+        },
+    }
+
+    if required_deployments != STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 {
+        return StatefulEvaluationStep::InfrastructureError {
+            error: ErrorCode {
+                kind: ERROR_STATEFUL_ACCOUNTING_MISMATCH,
+                detail: required_deployments,
+            },
+            stats: prior_stats,
+            shrink: prior_shrink,
+            claim_committed: false,
+        }
+    }
+
+    match preflight(StatefulFixtureRequest { context }) {
+        StatefulFixturePreflight::Ready => {},
+        StatefulFixturePreflight::InfrastructureError { error } => {
+            return StatefulEvaluationStep::InfrastructureError {
+                error,
+                stats: prior_stats,
+                shrink: prior_shrink,
+                claim_committed: false,
+            }
+        },
+    }
+
+    var stats = proposal_stats
+    var shrink = prior_shrink
+    match phase {
+        StatefulEvaluationPhase::Original => stats.attempts += 1,
+        StatefulEvaluationPhase::Shrink => shrink.evaluations += 1,
+    }
+    stats.property_evaluations += 1
+
+    let receipt = evaluate(StatefulActionSeqRequest { value, context })
+    stats.contract_deployments += required_deployments
+
+    let logical_len = action_seq_len(value) as u256
+    if receipt.actions_executed > logical_len {
+        return StatefulEvaluationStep::InfrastructureError {
+            error: ErrorCode {
+                kind: ERROR_STATEFUL_ACTIONS_EXCEED_SEQUENCE,
+                detail: receipt.actions_executed,
+            },
+            stats,
+            shrink,
+            claim_committed: true,
+        }
+    }
+
+    stats.actions_executed += receipt.actions_executed
+    match receipt.verdict {
+        PropertyVerdict::Pass => {
+            if receipt.actions_executed != logical_len {
+                return StatefulEvaluationStep::InfrastructureError {
+                    error: ErrorCode {
+                        kind: ERROR_STATEFUL_PASS_INCOMPLETE_ACTIONS,
+                        detail: receipt.actions_executed,
+                    },
+                    stats,
+                    shrink,
+                    claim_committed: true,
+                }
+            }
+        },
+        _ => {},
+    }
+
+    StatefulEvaluationStep::Evaluated { stats, shrink, verdict: receipt.verdict }
+}
+
+fn shrink_u256_action_seq_stateful_prevalidated<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ original: ActionSeq<u256, N>,
+    _ failure: FailureKey,
+    _ master_seed: u256,
+    _ run_id: u256,
+    _ attempt_index: u256,
+    _ config: RunConfig,
+    _ starting_stats: RunStats,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulU256ActionSeqShrinkResult<N>
+uses (P::E, X::E)
+{
+    var run_stats = starting_stats
+    var shrink = empty_shrink_stats()
+    var current = original
+    var cursor = match u256_action_seq_shrink_start(strategy, current) {
+        Result::Ok(cursor) => cursor,
+        Result::Err(error) => {
+            return stateful_shrink_infrastructure(error, run_stats, shrink)
+        },
+    }
+
+    while true {
+        match u256_action_seq_shrink_next(cursor) {
+            U256ActionSeqShrinkStep::Done => {
+                return StatefulU256ActionSeqShrinkResult::Complete {
+                    minimal: current,
+                    stats: run_stats,
+                    shrink,
+                    status: ShrinkStatus::CompleteLocal,
+                }
+            },
+            U256ActionSeqShrinkStep::Candidate { value, cursor: next } => {
+                if shrink.evaluations == config.max_shrink_evaluations {
+                    return StatefulU256ActionSeqShrinkResult::Complete {
+                        minimal: current,
+                        stats: run_stats,
+                        shrink,
+                        status: ShrinkStatus::PartialBudget,
+                    }
+                }
+                if !u256_action_seq_contains(strategy, value) {
+                    return stateful_shrink_infrastructure(
+                        ErrorCode {
+                            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+                            detail: action_seq_descriptor_or_zero(value),
+                        },
+                        run_stats,
+                        shrink,
+                    )
+                }
+                let decreases = match u256_action_seq_rank_less(strategy, value, current) {
+                    Result::Ok(decreases) => decreases,
+                    Result::Err(error) => {
+                        return stateful_shrink_infrastructure(error, run_stats, shrink)
+                    },
+                }
+                if !decreases {
+                    return stateful_shrink_infrastructure(
+                        ErrorCode {
+                            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+                            detail: action_seq_descriptor_or_zero(value),
+                        },
+                        run_stats,
+                        shrink,
+                    )
+                }
+
+                let context = StatefulEvaluationContext {
+                    run_fingerprint: run_id,
+                    suite_id: config.suite_id,
+                    run_namespace: config.namespace,
+                    master_seed,
+                    attempt_index,
+                    local_evaluation_index: shrink.evaluations + 1,
+                }
+                match evaluate_stateful_once(
+                    config,
+                    value,
+                    context,
+                    StatefulEvaluationPhase::Shrink,
+                    run_stats,
+                    shrink,
+                    preflight,
+                    evaluate,
+                ) {
+                    StatefulEvaluationStep::InfrastructureError {
+                        error,
+                        stats,
+                        shrink: evaluated_shrink,
+                        claim_committed: _,
+                    } => {
+                        return stateful_shrink_infrastructure(error, stats, evaluated_shrink)
+                    },
+                    StatefulEvaluationStep::Evaluated {
+                        stats,
+                        shrink: evaluated_shrink,
+                        verdict,
+                    } => {
+                        run_stats = stats
+                        shrink = evaluated_shrink
+                        match verdict {
+                            PropertyVerdict::Pass => {
+                                shrink.rejected_pass += 1
+                                cursor = next
+                            },
+                            PropertyVerdict::Discard => {
+                                shrink.rejected_discard += 1
+                                cursor = next
+                            },
+                            PropertyVerdict::Fail(candidate_failure) => {
+                                if failure_key_equal(candidate_failure, failure) {
+                                    shrink.accepted += 1
+                                    current = value
+                                    cursor = match u256_action_seq_shrink_start(strategy, current) {
+                                        Result::Ok(restarted) => restarted,
+                                        Result::Err(error) => {
+                                            return stateful_shrink_infrastructure(
+                                                error,
+                                                run_stats,
+                                                shrink,
+                                            )
+                                        },
+                                    }
+                                } else {
+                                    shrink.rejected_failure_key += 1
+                                    cursor = next
+                                }
+                            },
+                            PropertyVerdict::InfrastructureError(error) => {
+                                return stateful_shrink_infrastructure(error, run_stats, shrink)
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    stateful_shrink_infrastructure(
+        ErrorCode {
+            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+            detail: action_seq_descriptor_or_zero(current),
+        },
+        run_stats,
+        shrink,
+    )
+}
+
+/// Experimental, non-certified P0 stateful sequence runner.
+///
+/// The root ingot owns deterministic generation, evaluation identity,
+/// admission, counters, and shrinking. Consumer callbacks own EVM observation,
+/// three direct typed deployments, a fresh local model, and action execution.
+/// The type system forwards those effects but does not prove the callback
+/// protocol. This function therefore does not produce a replay capsule and
+/// must not be described as a certified stateful boundary.
+pub fn check_u256_action_seq_stateful_experimental<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ registry: StatefulRunRegistry,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulActionSeqRunReport<N>
+uses (P::E, X::E)
+{
+    match validate_run_config_for_codec(config, action_seq_u256_codec_fingerprint()) {
+        Option::Some(error) => {
+            return stateful_action_seq_configuration_error(error, registry)
+        },
+        Option::None => {},
+    }
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return stateful_action_seq_configuration_error(error, registry)
+        },
+        Option::None => {},
+    }
+    match validate_stateful_fixture_plan(config, p0_fixture_plan()) {
+        Option::Some(error) => {
+            return stateful_action_seq_configuration_error(error, registry)
+        },
+        Option::None => {},
+    }
+
+    var stats = empty_run_stats()
+    if config.target_valid_cases == 0 {
+        return stateful_action_seq_report(RunOutcome::Passed { stats }, registry)
+    }
+
+    let proposed_registry = match stateful_run_registry_claim(
+        registry,
+        config.suite_id,
+        config.namespace,
+    ) {
+        StatefulRunRegistryClaim::Claimed { registry } => registry,
+        StatefulRunRegistryClaim::Rejected { error, registry } => {
+            return stateful_action_seq_configuration_error(error, registry)
+        },
+    }
+    var active_registry = registry
+
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    let run_id = run_fingerprint(generation, config)
+    while stats.valid_cases < config.target_valid_cases {
+        let attempt_index = stats.attempts
+        let value = match generate_u256_action_seq_attempt(
+            strategy,
+            master_seed,
+            generation,
+            attempt_index,
+        ) {
+            GenerationResult::Value(value) => value,
+            GenerationResult::InfrastructureError(error) => {
+                return stateful_action_seq_infrastructure_error(error, stats, active_registry)
+            },
+        }
+        let context = StatefulEvaluationContext {
+            run_fingerprint: run_id,
+            suite_id: config.suite_id,
+            run_namespace: config.namespace,
+            master_seed,
+            attempt_index,
+            local_evaluation_index: 0,
+        }
+        let verdict = match evaluate_stateful_once(
+            config,
+            value,
+            context,
+            StatefulEvaluationPhase::Original,
+            stats,
+            empty_shrink_stats(),
+            preflight,
+            evaluate,
+        ) {
+            StatefulEvaluationStep::InfrastructureError {
+                error,
+                stats: failed_stats,
+                shrink: _,
+                claim_committed,
+            } => {
+                if claim_committed {
+                    active_registry = proposed_registry
+                }
+                return stateful_action_seq_infrastructure_error(
+                    error,
+                    failed_stats,
+                    active_registry,
+                )
+            },
+            StatefulEvaluationStep::Evaluated { stats: evaluated_stats, shrink: _, verdict } => {
+                active_registry = proposed_registry
+                stats = evaluated_stats
+                verdict
+            },
+        }
+
+        match verdict {
+            PropertyVerdict::Pass => stats.valid_cases += 1,
+            PropertyVerdict::Discard => {
+                stats.discards += 1
+                if stats.discards > config.max_discards {
+                    return stateful_action_seq_report(
+                        RunOutcome::Exhausted { reason: ExhaustionReason::MaxDiscards, stats },
+                        active_registry,
+                    )
+                }
+            },
+            PropertyVerdict::InfrastructureError(error) => {
+                return stateful_action_seq_infrastructure_error(error, stats, active_registry)
+            },
+            PropertyVerdict::Fail(failure) => {
+                match shrink_u256_action_seq_stateful_prevalidated(
+                    strategy,
+                    value,
+                    failure,
+                    master_seed,
+                    run_id,
+                    attempt_index,
+                    config,
+                    stats,
+                    preflight,
+                    evaluate,
+                ) {
+                    StatefulU256ActionSeqShrinkResult::Complete {
+                        minimal,
+                        stats,
+                        shrink,
+                        status,
+                    } => {
+                        return stateful_action_seq_report(
+                            RunOutcome::Falsified {
+                                original: value,
+                                minimal,
+                                failure,
+                                stats,
+                                shrink,
+                                shrink_status: status,
+                            },
+                            active_registry,
+                        )
+                    },
+                    StatefulU256ActionSeqShrinkResult::InfrastructureError {
+                        error,
+                        stats,
+                        shrink: _,
+                    } => {
+                        return stateful_action_seq_infrastructure_error(
+                            error,
+                            stats,
+                            active_registry,
+                        )
+                    },
+                }
+            },
+        }
+    }
+
+    stateful_action_seq_report(RunOutcome::Passed { stats }, active_registry)
+}

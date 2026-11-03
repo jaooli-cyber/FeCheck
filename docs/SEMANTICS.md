@@ -1,7 +1,8 @@
-# FeCheck semantics - implemented pure slice
+# FeCheck semantics - implemented slices
 
 This document describes behavior enforced by the current code and tests. It is
-not a roadmap and does not claim unfinished stateful features.
+not a roadmap and distinguishes certified pure behavior from the experimental
+stateful callback boundary.
 
 ## Attempt identity
 
@@ -229,30 +230,33 @@ pure sequence path only; it is not evidence of stateful EVM execution.
 `P: PureU256Property`. Their sequence counterparts accept only
 `P: PureU256ActionSeqProperty<N>`. Both `evaluate` methods have an empty Fe
 effect row, so effectful counters or mutable-history dependencies cannot cross
-the public certification boundary. Effect-forwarding callable adapters exist
-only as `pub(ingot)` test and instrumentation primitives. The prevalidated shrink
+the public certification boundary. Effect-forwarding adapters behind those
+pure entry points exist only as `pub(ingot)` test and instrumentation
+primitives. The prevalidated shrink
 primitive is likewise ingot-internal; the checked runner and replay establish
 its original-failure precondition.
 
-Stateful EVM properties require a separate adapter that creates a fresh fixture
-and model for every evaluation. That adapter is not implemented in this slice.
+Stateful EVM properties use a separate effect-forwarding adapter that creates a
+fresh fixture and model for every evaluation. The public experimental runner
+accepts such callbacks, but they are deliberately outside the pure
+certification boundary.
 
 ## Stateful identity and admission foundation
 
 The implemented stateful foundation does not execute EVM properties. It defines
 a fixed deployment plan, a complete logical evaluation context, the canonical
-fixture salt above, and ingot-internal preflight primitives that check both
+fixture salt above, and ingot-internal admission primitives that check both
 state-evaluation and deployment capacity before committing any work. A rejected
 admission returns the input statistics unchanged. An accepted admission
 increments only `fixture_evaluations` and returns the required deployment
 count. That count is
-not a persistent reservation. Before another admission, the future scheduler
-must complete and account for the admitted fixture; inconsistent prior
+not a persistent reservation. Before another admission, the scheduler must
+complete and account for the admitted fixture; inconsistent prior
 `fixture_evaluations` and `contract_deployments` are rejected. Attempts,
-property evaluations, deployments, actions, and shrink counters remain the
-responsibility of that future scheduler and fixture executor.
+property evaluations, deployments, actions, and shrink counters are the
+responsibility of the experimental scheduler and fixture executor.
 
-These low-level primitives require the future scheduler to validate the global
+These low-level primitives require the scheduler to validate the global
 RunConfig, codec, and caps first; they are not a public certified boundary.
 Plan validation then requires a nonzero deployments-per-evaluation count and
 checks
@@ -266,8 +270,73 @@ full-registry error. The registry proves only the history carried by that
 caller: constructing a new registry resets it, so it is not an EVM-global
 namespace guarantee.
 
-No CREATE2 deployment, proxy actor, model execution, stateful runner, stateful
-capsule, or stateful replay is claimed by this foundation.
+The foundation itself performs no CREATE2 deployment, proxy call, or model
+execution. The separate experimental runner composes it with consumer-defined
+callbacks; no stateful capsule or replay is claimed.
+
+## Experimental stateful ActionSeq runner
+
+`check_u256_action_seq_stateful_experimental` specializes the current stateful
+path to `ActionSeq<u256, N>` and fixes the P0 fixture plan internally at three
+deployments: Target, ActorA, and ActorB. The plan is not caller-selectable. The
+root ingot owns deterministic generation, context construction, admission,
+statistics, verdict classification, and shrinking; it imports no EVM capability
+and contains no contracts.
+
+Each evaluation follows this order:
+
+1. propose state/deployment admission against the completed prior statistics;
+2. call the adapter preflight with only the evaluation context;
+3. after `Ready`, adopt `fixture_evaluations += 1`, then increment the original
+   attempt or shrink evaluation and `property_evaluations`;
+4. call the evaluator with the sequence and context;
+5. if it returns, account for exactly three deployments and validate its action
+   receipt before classifying the verdict.
+
+An original evaluation uses `local_evaluation_index = 0`. Shrink candidates
+keep the falsifying `attempt_index` and use dense local indices `1..Q` in actual
+evaluation order. Candidate budget has precedence over domain/rank checks,
+state admission, and preflight. A candidate is accepted only for the original
+`FailureKey`; acceptance restarts enumeration from the new value without
+resetting the local index. The final minimal value is not reevaluated.
+
+For a conforming structured result:
+
+```text
+property_evaluations = fixture_evaluations = attempts + shrink_evaluations
+contract_deployments = 3 * fixture_evaluations
+```
+
+`actions_executed` is the sum of callback receipts. Every receipt must satisfy
+`actions_executed <= logical_length`; otherwise error 507 is returned after
+counting the completed fixture but without accepting the impossible action
+count. A `Pass` must additionally report every logical action executed;
+reporting a strict prefix returns error 508. `Discard`, `Fail`, and
+`InfrastructureError` may report a real prefix. A captured action call that was
+attempted counts as executed; an uncaught call revert aborts the outer
+evaluation and yields no structured statistics.
+
+The caller-owned registry uses transactional adoption. Configuration, strategy,
+or static-plan errors leave it unchanged. `target_valid_cases = 0` performs no
+claim or callback. For a nonzero target, duplicate/full checks happen before
+generation, but the proposed claim is returned only after the first preflight
+reports `Ready`. A first admission or preflight error therefore leaves the
+registry unchanged; every structured result after `Ready` carries the claim.
+The registry remains bounded, resettable, and local to the caller.
+
+The callback protocol is not proven by Fe's type system. In particular, Fe
+forwards the consumer's EVM effect but cannot prove that preflight is
+non-mutating or that a returning evaluator deployed the complete fixture and
+created a fresh model. A direct typed CREATE2 collision, constructor revert, or
+other uncaught deployment failure reverts the outer evaluation and returns no
+`RunOutcome`. A zero-code preflight observation does not exclude nonce,
+constructor, or resource failures.
+
+The current run and fixture fingerprints do not bind adapter bytecode, model,
+fixture policy, or a stateful certificate format. The experimental result is
+therefore not a stateful replay certificate, not a cross-build address
+guarantee, and not a global uniqueness proof. See `docs/STATEFUL_RUNNER.md` for
+the complete protocol and executable evidence boundary.
 
 ## Test-only EVM capability evidence
 
@@ -302,11 +371,13 @@ accounting, and that capture path has not been adopted by a runner.
 The root ingot emits no deployable contract artifacts; only the separate probe
 ingot contains the five contracts used for this evidence.
 
-These probes do not establish a stateful property adapter, fresh model,
-scheduler, deployment/action statistics, shrinking, capsule, replay, or a fresh
-global EVM. Concrete addresses are test observations only and are not part of a
-fingerprint, failure key, or capsule. See `docs/EVM_PROBES.md` for the evidence
-matrix and reproduction commands.
+These probes alone do not establish the experimental scheduler, its property
+adapter, model, deployment/action statistics, or shrinking; that separate
+integration evidence lives in `tests/stateful-runner`. Neither suite establishes
+a stateful capsule, replay, fresh global EVM, or cross-build address stability.
+Concrete addresses are test observations only and are not part of a failure
+key or capsule. See `docs/EVM_PROBES.md` and `docs/STATEFUL_RUNNER.md` for the
+two evidence boundaries.
 
 ## Action sequence boundary
 
@@ -398,6 +469,8 @@ The pure sequence runner now has certified capsules and direct replay. Its
 distinct capsule binds all sequence strategy and run identity described above,
 and replay checks the original canonical digest before property evaluation,
 then reproduces the exact failure-key-preserving shrink evidence. Stateful
-evaluation must additionally create a fresh fixture and model for every
-candidate. Stateful capsules, fixtures, deployment accounting, and those
-execution layers are not yet claimed.
+evaluation additionally creates a fresh fixture and model for every evaluated
+original or candidate through the experimental callback boundary. The scheduler,
+fixed deployment accounting, action receipts, and isolated EVM golden are
+implemented. Stateful capsules, replay, and type-level proof of the adapter
+protocol are not claimed.

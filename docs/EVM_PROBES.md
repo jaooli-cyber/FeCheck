@@ -4,7 +4,8 @@ Evidence date: 2026-11-03. Toolchain: Fe 26.5.0 (`3dab95f`).
 
 This document records executable contest evidence. The contracts and tests live
 in the separate `tests/evm-probes` ingot, which depends on the root `fecheck`
-library. They do not become root build artifacts or expose a public stateful API.
+library. They do not become root build artifacts; the experimental public
+stateful API is defined in the contract-free root independently of these probes.
 
 ## Verified matrix
 
@@ -45,10 +46,13 @@ factory probe does not authorize mapping failures into `InfrastructureError`,
 does not provide atomic fixture accounting, and is not part of the current
 runner architecture.
 
-No scheduler, stateful property/model adapter, deployment counter integration,
-shrinking, stateful capsule, stateful replay, fresh global EVM, cross-build
-address stability, AccountingLedger behavior, or production collision recovery
-is claimed. Addresses never enter logical failure identity.
+This probe suite alone does not establish the experimental scheduler, its
+stateful property/model adapter, deployment counter integration, or shrinking;
+that separate evidence lives in `tests/stateful-runner`. Neither suite claims a
+stateful capsule, stateful replay, fresh global EVM, cross-build address
+stability, AccountingLedger behavior, or production collision recovery.
+Addresses never enter logical failure identity. See
+[`STATEFUL_RUNNER.md`](STATEFUL_RUNNER.md) for the scheduler boundary.
 
 ## Reproduce
 
@@ -58,6 +62,6 @@ fe check tests/evm-probes --profile dev
 fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 ```
 
-The probe ingot contains 9 tests; the root ingot contains 85, for 94 in total.
-Keep `--jobs 1` for predictable resource use while compiling embedded
-contracts.
+The capability-probe ingot contains 9 tests, the root ingot contains 97, and
+the separate stateful-runner ingot contains 2, for 108 Fe tests in total. Keep
+`--jobs 1` for predictable resource use while compiling embedded contracts.

@@ -1,0 +1,6 @@
+[ingot]
+name = "fecheck_stateful_runner_probe"
+version = "0.1.0"
+
+[dependencies]
+fecheck = { path = "../.." }
