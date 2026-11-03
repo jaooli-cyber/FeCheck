@@ -1,0 +1,674 @@
+use ingot::{
+    ActionSeq,
+    ErrorCode,
+    GenerationResult,
+    Strategy,
+    U256ActionSeqShrinkCursor,
+    U256ActionSeqShrinkStep,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_empty,
+    action_seq_get,
+    action_seq_u256_codec_fingerprint,
+    action_seq_len,
+    action_seq_try_new,
+    action_seq_u256_delete_block,
+    action_seq_u256_descriptor,
+    action_seq_u256_logical_equal,
+    generate_u256_action_seq_attempt,
+    generation_fingerprint,
+    scalar_candidate_at,
+    u256_action_seq_contains,
+    u256_action_seq_digest,
+    u256_action_seq_edge_at,
+    u256_action_seq_edge_count,
+    u256_action_seq_fingerprint,
+    u256_action_seq_rank_less,
+    u256_action_seq_shrink_next,
+    u256_action_seq_shrink_start,
+    u256_action_seq_validate,
+}
+
+fn expect_sequence<const N: usize>(_ result: Result<ErrorCode, ActionSeq<u256, N>>) -> ActionSeq<
+    u256,
+    N,
+> {
+    match result {
+        Result::Ok(sequence) => sequence,
+        Result::Err(_) => {
+            assert!(false)
+            action_seq_empty(0)
+        },
+    }
+}
+
+fn expect_descriptor<const N: usize>(_ sequence: ActionSeq<u256, N>) -> u256 {
+    match action_seq_u256_descriptor(sequence) {
+        Result::Ok(digest) => digest,
+        Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_digest<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+) -> u256 {
+    match u256_action_seq_digest(strategy, sequence) {
+        Result::Ok(digest) => digest,
+        Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_item<const N: usize>(_ sequence: ActionSeq<u256, N>, _ index: usize) -> u256 {
+    match action_seq_get(sequence, index) {
+        Option::Some(value) => value,
+        Option::None => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_generated<const N: usize>(_ result: GenerationResult<ActionSeq<u256, N>>) -> ActionSeq<
+    u256,
+    N,
+> {
+    match result {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            action_seq_empty(0)
+        },
+    }
+}
+
+fn expect_cursor<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+) -> U256ActionSeqShrinkCursor<N> {
+    match u256_action_seq_shrink_start(strategy, sequence) {
+        Result::Ok(cursor) => cursor,
+        Result::Err(_) => {
+            assert!(false)
+            U256ActionSeqShrinkCursor::Done
+        },
+    }
+}
+
+fn expect_step<const N: usize>(
+    _ step: U256ActionSeqShrinkStep<N>,
+    _ expected: ActionSeq<u256, N>,
+) -> U256ActionSeqShrinkCursor<N> {
+    match step {
+        U256ActionSeqShrinkStep::Done => {
+            assert!(false)
+            U256ActionSeqShrinkCursor::Done
+        },
+        U256ActionSeqShrinkStep::Candidate { value, cursor } => {
+            assert!(action_seq_u256_logical_equal(value, expected))
+            cursor
+        },
+    }
+}
+
+fn expect_less(_ result: Result<ErrorCode, bool>) -> bool {
+    match result {
+        Result::Ok(value) => value,
+        Result::Err(_) => {
+            assert!(false)
+            false
+        },
+    }
+}
+
+fn reference_delete_block_3(
+    _ source: ActionSeq<u256, 3>,
+    _ block_len: usize,
+    _ start: usize,
+) -> ActionSeq<u256, 3> {
+    var items = [0, 0, 0]
+    var source_index: usize = 0
+    var destination_index: usize = 0
+    let source_len = action_seq_len(source)
+    while source_index < source_len {
+        if source_index < start || source_index >= start + block_len {
+            items[destination_index] = expect_item(source, source_index)
+            destination_index += 1
+        }
+        source_index += 1
+    }
+    expect_sequence(action_seq_try_new(items, source_len - block_len))
+}
+
+fn reference_replace_item_3(
+    _ source: ActionSeq<u256, 3>,
+    _ index: usize,
+    _ replacement: u256,
+) -> ActionSeq<u256, 3> {
+    var items = [0, 0, 0]
+    var cursor: usize = 0
+    let source_len = action_seq_len(source)
+    while cursor < source_len {
+        items[cursor] = if cursor == index {
+            replacement
+        } else {
+            expect_item(source, cursor)
+        }
+        cursor += 1
+    }
+    expect_sequence(action_seq_try_new(items, source_len))
+}
+
+/// Independent, test-only reference enumerator for Capacity=3.
+///
+/// It reconstructs block deletions and argument replacements directly from the
+/// public logical prefix instead of calling the production sequence shrink FSM.
+fn reference_candidate_at_3(
+    _ strategy: U256ActionSeqStrategy<3>,
+    _ source: ActionSeq<u256, 3>,
+    _ ordinal: usize,
+) -> Option<ActionSeq<u256, 3>> {
+    var emitted: usize = 0
+    var block_len = action_seq_len(source)
+    while block_len > 0 {
+        var start: usize = 0
+        while start + block_len <= action_seq_len(source) {
+            let candidate = reference_delete_block_3(source, block_len, start)
+            var duplicate = false
+            var previous_start: usize = 0
+            while previous_start < start {
+                let previous = reference_delete_block_3(source, block_len, previous_start)
+                if action_seq_u256_logical_equal(previous, candidate) {
+                    duplicate = true
+                }
+                previous_start += 1
+            }
+            if !duplicate {
+                if emitted == ordinal {
+                    return Option::Some(candidate)
+                }
+                emitted += 1
+            }
+            start += 1
+        }
+        block_len -= 1
+    }
+
+    var action_index: usize = 0
+    while action_index < action_seq_len(source) {
+        var scalar_ordinal: u256 = 0
+        var scalar_done = false
+        while !scalar_done {
+            match scalar_candidate_at(
+                strategy.action.origin,
+                expect_item(source, action_index),
+                scalar_ordinal,
+            ) {
+                Option::None => scalar_done = true,
+                Option::Some(replacement) => {
+                    let candidate = reference_replace_item_3(source, action_index, replacement)
+                    if emitted == ordinal {
+                        return Option::Some(candidate)
+                    }
+                    emitted += 1
+                    scalar_ordinal += 1
+                },
+            }
+        }
+        action_index += 1
+    }
+    Option::None
+}
+
+#[test]
+fn canonical_descriptor_and_digest_ignore_the_physical_tail() {
+    let strategy = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 4,
+    }
+    let left = expect_sequence(action_seq_try_new([7, 9, 111, 222], 2))
+    let right = expect_sequence(action_seq_try_new([7, 9, u256::max(), u256::max()], 2))
+    let other_capacity = expect_sequence(action_seq_try_new([7, 9, 555], 2))
+
+    assert!(action_seq_u256_logical_equal(left, right))
+    assert!(expect_descriptor(left) == expect_descriptor(right))
+    assert!(
+        expect_descriptor(left) == expect_descriptor(other_capacity),
+    )
+    assert!(
+        expect_digest(strategy, left) == expect_digest(strategy, right),
+    )
+    assert!(action_seq_get(left, 2).is_none())
+    assert!(u256_action_seq_contains(strategy, right))
+
+    let invalid_active = expect_sequence(action_seq_try_new([7, 1001, 0, 0], 2))
+    assert!(!u256_action_seq_contains(strategy, invalid_active))
+    assert!(u256_action_seq_digest(strategy, invalid_active).is_err())
+    assert!(
+        u256_action_seq_shrink_start(strategy, invalid_active).is_err(),
+    )
+
+    let capacity_three: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 3,
+    }
+    let max_three: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 3,
+    }
+    let other_action: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 999, origin: 0 },
+        max_actions: 4,
+    }
+    assert!(
+        u256_action_seq_fingerprint(strategy) != u256_action_seq_fingerprint(max_three),
+    )
+    assert!(
+        u256_action_seq_fingerprint(capacity_three) != u256_action_seq_fingerprint(max_three),
+    )
+    assert!(
+        u256_action_seq_fingerprint(strategy) != u256_action_seq_fingerprint(other_action),
+    )
+}
+
+#[test]
+fn edges_validate_zero_one_and_full_logical_lengths() {
+    let zero: U256ActionSeqStrategy<0> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 0,
+    }
+    assert!(u256_action_seq_validate(zero).is_none())
+    assert!(u256_action_seq_edge_count(zero) == 1)
+    let zero_edge = expect_generated(u256_action_seq_edge_at(zero, 0))
+    assert!(action_seq_len(zero_edge) == 0)
+    let zero_generation = generation_fingerprint(u256_action_seq_fingerprint(zero))
+    let zero_random = expect_generated(
+        generate_u256_action_seq_attempt(zero, 7, zero_generation, 1),
+    )
+    assert!(action_seq_len(zero_random) == 0)
+    match u256_action_seq_shrink_start(zero, zero_random) {
+        Result::Err(_) => assert!(false),
+        Result::Ok(cursor) => {
+            match u256_action_seq_shrink_next(cursor) {
+                U256ActionSeqShrinkStep::Done => {},
+                U256ActionSeqShrinkStep::Candidate { value: _, cursor: _ } => assert!(false),
+            }
+        },
+    }
+
+    let one: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 1,
+    }
+    assert!(u256_action_seq_edge_count(one) == 2)
+    assert!(
+        action_seq_len(expect_generated(u256_action_seq_edge_at(one, 1))) == 1,
+    )
+
+    let full: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 3,
+    }
+    assert!(u256_action_seq_edge_count(full) == 3)
+    assert!(
+        action_seq_len(expect_generated(u256_action_seq_edge_at(full, 2))) == 3,
+    )
+
+    let invalid_max: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 4,
+    }
+    let invalid_capacity: U256ActionSeqStrategy<5> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 5,
+    }
+    let invalid_action: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 2, hi: 1, origin: 2 },
+        max_actions: 3,
+    }
+    assert!(u256_action_seq_validate(invalid_max).is_some())
+    assert!(u256_action_seq_validate(invalid_capacity).is_some())
+    assert!(u256_action_seq_validate(invalid_action).is_some())
+}
+
+#[test]
+fn capacity_one_is_a_valid_and_complete_boundary_case() {
+    let strategy: U256ActionSeqStrategy<1> = U256ActionSeqStrategy {
+        action: U256Range { lo: 5, hi: 9, origin: 5 },
+        max_actions: 1,
+    }
+    assert!(u256_action_seq_validate(strategy).is_none())
+    assert!(u256_action_seq_edge_count(strategy) == 2)
+    let origin_edge = expect_generated(u256_action_seq_edge_at(strategy, 1))
+    assert!(action_seq_len(origin_edge) == 1)
+    assert!(expect_item(origin_edge, 0) == 5)
+
+    let source = expect_sequence(action_seq_try_new([7], 1))
+    var cursor = expect_cursor(strategy, source)
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([5], 0)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([5], 1)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([6], 1)),
+    )
+    match u256_action_seq_shrink_next(cursor) {
+        U256ActionSeqShrinkStep::Done => {},
+        U256ActionSeqShrinkStep::Candidate { value: _, cursor: _ } => assert!(false),
+    }
+}
+
+#[test]
+fn attempt_generation_is_deterministic_and_checks_identity() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 3,
+    }
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+
+    assert!(
+        action_seq_len(
+                expect_generated(
+                    generate_u256_action_seq_attempt(strategy, 7, generation, 0),
+                ),
+            )
+            == 0,
+    )
+    assert!(
+        action_seq_len(
+                expect_generated(
+                    generate_u256_action_seq_attempt(strategy, 7, generation, 1),
+                ),
+            )
+            == 1,
+    )
+    assert!(
+        action_seq_len(
+                expect_generated(
+                    generate_u256_action_seq_attempt(strategy, 7, generation, 2),
+                ),
+            )
+            == 3,
+    )
+
+    let first = expect_generated(
+        generate_u256_action_seq_attempt(strategy, 7, generation, 3),
+    )
+    let replayed = expect_generated(
+        generate_u256_action_seq_attempt(strategy, 7, generation, 3),
+    )
+    assert!(action_seq_u256_logical_equal(first, replayed))
+    match generate_u256_action_seq_attempt(strategy, 7, generation + 1, 3) {
+        GenerationResult::Value(_) => assert!(false),
+        GenerationResult::InfrastructureError(_) => {},
+    }
+}
+
+#[test]
+fn shrink_order_is_blocks_then_left_to_right_arguments() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 0 },
+        max_actions: 3,
+    }
+    let source = expect_sequence(action_seq_try_new([1, 2, 3], 3))
+    var cursor = expect_cursor(strategy, source)
+
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([0, 0, 0], 0)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([3, 0, 0], 1)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 0, 0], 1)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([2, 3, 0], 2)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 3, 0], 2)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 2, 0], 2)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([0, 2, 3], 3)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 0, 3], 3)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 1, 3], 3)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 2, 0], 3)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 2, 1], 3)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 2, 2], 3)),
+    )
+    match u256_action_seq_shrink_next(cursor) {
+        U256ActionSeqShrinkStep::Done => {},
+        U256ActionSeqShrinkStep::Candidate { value: _, cursor: _ } => assert!(false),
+    }
+}
+
+#[test]
+fn repeated_actions_are_deduplicated_by_logical_equality() {
+    let strategy: U256ActionSeqStrategy<2> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1, origin: 0 },
+        max_actions: 2,
+    }
+    let source = expect_sequence(action_seq_try_new([1, 1], 2))
+    var cursor = expect_cursor(strategy, source)
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([0, 0], 0)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 0], 1)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([0, 1], 2)),
+    )
+    cursor = expect_step(
+        u256_action_seq_shrink_next(cursor),
+        expect_sequence(action_seq_try_new([1, 0], 2)),
+    )
+    match u256_action_seq_shrink_next(cursor) {
+        U256ActionSeqShrinkStep::Done => {},
+        U256ActionSeqShrinkStep::Candidate { value: _, cursor: _ } => assert!(false),
+    }
+}
+
+#[test]
+fn all_small_candidates_are_unique_in_domain_and_strictly_smaller() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 2, origin: 0 },
+        max_actions: 3,
+    }
+    let empty = expect_sequence(action_seq_try_new([0, 0, 0], 0))
+    var a: u256 = 0
+    while a <= 2 {
+        var b: u256 = 0
+        while b <= 2 {
+            var c: u256 = 0
+            while c <= 2 {
+                var len: usize = 0
+                while len <= 3 {
+                    let source = expect_sequence(action_seq_try_new([a, b, c], len))
+                    var seen = [empty; 32]
+                    var seen_count: usize = 0
+                    var cursor = expect_cursor(strategy, source)
+                    var done = false
+                    while !done {
+                        match u256_action_seq_shrink_next(cursor) {
+                            U256ActionSeqShrinkStep::Done => {
+                                assert!(
+                                    reference_candidate_at_3(strategy, source, seen_count)
+                                        .is_none(),
+                                )
+                                done = true
+                            },
+                            U256ActionSeqShrinkStep::Candidate {
+                                value: candidate,
+                                cursor: next,
+                            } => {
+                                match reference_candidate_at_3(strategy, source, seen_count) {
+                                    Option::None => assert!(false),
+                                    Option::Some(expected) => {
+                                        assert!(action_seq_u256_logical_equal(candidate, expected))
+                                    },
+                                }
+                                assert!(u256_action_seq_contains(strategy, candidate))
+                                assert!(
+                                    expect_less(
+                                        u256_action_seq_rank_less(strategy, candidate, source),
+                                    ),
+                                )
+                                var previous: usize = 0
+                                while previous < seen_count {
+                                    assert!(
+                                        !action_seq_u256_logical_equal(seen[previous], candidate),
+                                    )
+                                    previous += 1
+                                }
+                                seen[seen_count] = candidate
+                                seen_count += 1
+                                assert!(seen_count <= 32)
+                                cursor = next
+                            },
+                        }
+                    }
+                    len += 1
+                }
+                c += 1
+            }
+            b += 1
+        }
+        a += 1
+    }
+}
+
+#[test]
+fn capacity_four_worst_case_enumerates_all_1038_candidates_and_terminates() {
+    let strategy: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 4,
+    }
+    let maximum = u256::max()
+    let source = expect_sequence(
+        action_seq_try_new([maximum, maximum - 1, maximum - 2, maximum - 3], 4),
+    )
+    var cursor = expect_cursor(strategy, source)
+    var count: usize = 0
+    var done = false
+    while !done {
+        match u256_action_seq_shrink_next(cursor) {
+            U256ActionSeqShrinkStep::Done => done = true,
+            U256ActionSeqShrinkStep::Candidate { value, cursor: next } => {
+                assert!(
+                    expect_less(u256_action_seq_rank_less(strategy, value, source)),
+                )
+                count += 1
+                assert!(count <= 1038)
+                cursor = next
+            },
+        }
+    }
+    assert!(count == 1038)
+}
+
+#[test]
+fn block_deletion_validates_bounds_and_normalizes_tail() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 5, hi: 9, origin: 5 },
+        max_actions: 3,
+    }
+    let source = expect_sequence(action_seq_try_new([6, 7, 8], 3))
+    assert!(
+        action_seq_u256_delete_block(strategy, source, 0, 0).is_err(),
+    )
+    assert!(
+        action_seq_u256_delete_block(strategy, source, 4, 0).is_err(),
+    )
+    assert!(
+        action_seq_u256_delete_block(strategy, source, 2, 2).is_err(),
+    )
+
+    let reduced = expect_sequence(action_seq_u256_delete_block(strategy, source, 1, 1))
+    assert!(action_seq_len(reduced) == 2)
+    assert!(expect_item(reduced, 0) == 6)
+    assert!(expect_item(reduced, 1) == 8)
+    assert!(action_seq_get(reduced, 2).is_none())
+}
+
+#[test]
+fn action_seq_goldens_match_the_independent_python_oracle() {
+    let strategy: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 4,
+    }
+    let sequence = expect_sequence(action_seq_try_new([7, 9, 111, 222], 2))
+
+    assert!(
+        expect_descriptor(sequence)
+            == 0x73d301623f09544653fd3005bd55d8f38eb5e1b14a063cf7720ae69cc0c38495,
+    )
+    assert!(
+        action_seq_u256_codec_fingerprint()
+            == 0xb54d75c8a3cb0e657321665b2b2fc4c54aa2520a59fe9492bd484f0909c1aa60,
+    )
+    assert!(
+        u256_action_seq_fingerprint(strategy)
+            == 0x976794971cc060d47f80daa839dcddea1a5153293f0407de060ee8f953079523,
+    )
+    assert!(
+        expect_digest(strategy, sequence)
+            == 0xfc47ad2f0602fb50f9a7a65069ba7f9e11a80f34dc6857f7ef431aefc0fa0956,
+    )
+
+    let max_zero: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 0,
+    }
+    let max_one: U256ActionSeqStrategy<4> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 1000, origin: 0 },
+        max_actions: 1,
+    }
+    assert!(
+        u256_action_seq_fingerprint(max_zero)
+            == 0x8f6185b61ef1943b0094d97cb12664d2e1f74b2854aa7c58f1fa77c6a190a954,
+    )
+    assert!(
+        u256_action_seq_fingerprint(max_one)
+            == 0xdbe5a7ece6c34a7289b4f5ffec51d3015bd7e484d2576256583147fd98d6c73d,
+    )
+}

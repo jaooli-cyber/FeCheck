@@ -1,0 +1,348 @@
+use super::action_seq::{
+    ActionSeq,
+    U256ActionSeqStrategy,
+    generate_u256_action_seq_attempt,
+    u256_action_seq_digest,
+    u256_action_seq_fingerprint,
+    u256_action_seq_validate,
+}
+use super::action_seq_runner::{
+    PureU256ActionSeqCallable,
+    PureU256ActionSeqProperty,
+    U256ActionSeqShrinkResult,
+    check_u256_action_seq_pure,
+    shrink_u256_action_seq_prevalidated,
+}
+use super::capsule::{
+    ERROR_REPLAY_ALGORITHM_VERSION,
+    ERROR_REPLAY_ATTEMPT_IDENTITY,
+    ERROR_REPLAY_CAPSULE_FORMAT,
+    ERROR_REPLAY_EDGE_POLICY_VERSION,
+    ERROR_REPLAY_FLAGS,
+    ERROR_REPLAY_GENERATION_FINGERPRINT,
+    ERROR_REPLAY_NAMESPACE,
+    ERROR_REPLAY_RUN_FINGERPRINT,
+    ERROR_REPLAY_SUITE,
+    EVIDENCE_REDUCED_DIGEST,
+    EVIDENCE_SHRINK_STATS,
+    EVIDENCE_SHRINK_STATUS,
+    replay_run_stats_error_for_evidence,
+    shrink_stats_equal,
+    shrink_status_equal,
+}
+use super::codec::action_seq_u256_codec_fingerprint
+use super::outcome::{
+    ErrorCode,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::pure_runner::validate_run_config_for_codec
+use super::replay::{
+    CAPSULE_FORMAT_VERSION_V1,
+    GENERATION_ALGORITHM_VERSION_V1,
+    GENERATION_EDGE_POLICY_VERSION_V1,
+    RunConfig,
+    attempt_seed,
+    generation_fingerprint,
+    run_fingerprint,
+}
+use super::strategy::GenerationResult
+
+pub struct U256ActionSeqReplayCapsule {
+    pub format_version: u256,
+    pub algorithm_version: u256,
+    pub edge_policy_version: u256,
+    pub suite_id: u256,
+    pub run_namespace: u256,
+    pub master_seed: u256,
+    pub attempt_index: u256,
+    pub attempt_identity: u256,
+    pub generation_fingerprint: u256,
+    pub run_fingerprint: u256,
+    pub failure_key: FailureKey,
+    pub flags: u256,
+    pub original_digest: u256,
+    pub reduced_digest: u256,
+    pub run_stats: RunStats,
+    pub shrink_stats: ShrinkStats,
+    pub shrink_status: ShrinkStatus,
+}
+
+impl Copy for U256ActionSeqReplayCapsule {}
+
+pub struct U256ActionSeqRunReport<const N: usize> {
+    pub outcome: RunOutcome<ActionSeq<u256, N>>,
+    pub capsule: Option<U256ActionSeqReplayCapsule>,
+}
+
+impl<const N: usize> Copy for U256ActionSeqRunReport<N> {}
+
+pub enum U256ActionSeqReplayOutcome<const N: usize> {
+    Incompatible { pub error: ErrorCode },
+    ConfigurationError { pub error: ErrorCode },
+    OriginalDigestMismatch {
+        pub expected: u256,
+        pub observed: u256,
+    },
+    FailureNotObserved,
+    ReplayInputDiscarded,
+    ReplayInfrastructureError { pub error: ErrorCode },
+    FailureKeyMismatch {
+        pub expected: FailureKey,
+        pub observed: FailureKey,
+    },
+    ShrinkEvidenceMismatch { pub field: u256 },
+    Reproduced {
+        pub original: ActionSeq<u256, N>,
+        pub minimal: ActionSeq<u256, N>,
+        pub shrink: ShrinkStats,
+        pub shrink_status: ShrinkStatus,
+    },
+}
+
+impl<const N: usize> Copy for U256ActionSeqReplayOutcome<N> {}
+
+/// Runs an effect-free sequence property and emits replay evidence only for a
+/// successfully classified falsification.
+pub fn check_u256_action_seq_certified<const N: usize, P: PureU256ActionSeqProperty<N>>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> U256ActionSeqRunReport<N> {
+    let outcome = check_u256_action_seq_pure(strategy, master_seed, config, property)
+    match outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            let strategy_fp = u256_action_seq_fingerprint(strategy)
+            let original_digest = match u256_action_seq_digest(strategy, original) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return U256ActionSeqRunReport {
+                        outcome: RunOutcome::InfrastructureError { error, stats },
+                        capsule: Option::None,
+                    }
+                },
+            }
+            let reduced_digest = match u256_action_seq_digest(strategy, minimal) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return U256ActionSeqRunReport {
+                        outcome: RunOutcome::InfrastructureError { error, stats },
+                        capsule: Option::None,
+                    }
+                },
+            }
+            let generation = generation_fingerprint(strategy_fp)
+            let attempt_index = stats.attempts - 1
+            U256ActionSeqRunReport {
+                outcome,
+                capsule: Option::Some(
+                    U256ActionSeqReplayCapsule {
+                        format_version: CAPSULE_FORMAT_VERSION_V1,
+                        algorithm_version: GENERATION_ALGORITHM_VERSION_V1,
+                        edge_policy_version: GENERATION_EDGE_POLICY_VERSION_V1,
+                        suite_id: config.suite_id,
+                        run_namespace: config.namespace,
+                        master_seed,
+                        attempt_index,
+                        attempt_identity: attempt_seed(master_seed, attempt_index, generation),
+                        generation_fingerprint: generation,
+                        run_fingerprint: run_fingerprint(generation, config),
+                        failure_key: failure,
+                        flags: 0,
+                        original_digest,
+                        reduced_digest,
+                        run_stats: stats,
+                        shrink_stats: shrink,
+                        shrink_status,
+                    },
+                ),
+            }
+        },
+        _ => U256ActionSeqRunReport { outcome, capsule: Option::None },
+    }
+}
+
+fn action_seq_incompatible<const N: usize>(
+    _ kind: u256,
+    _ detail: u256,
+) -> U256ActionSeqReplayOutcome<N> {
+    U256ActionSeqReplayOutcome::Incompatible { error: ErrorCode { kind, detail } }
+}
+
+/// Ingot-only replay primitive used to prove direct attempt regeneration and
+/// preflight ordering with controlled instrumentation.
+pub(ingot) fn replay_u256_action_seq_capsule_with_callable<
+    const N: usize,
+    P: Fn(ActionSeq<u256, N>) -> PropertyVerdict,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ config: RunConfig,
+    _ capsule: U256ActionSeqReplayCapsule,
+    _ property: P,
+) -> U256ActionSeqReplayOutcome<N>
+uses P::E
+{
+    if capsule.format_version != CAPSULE_FORMAT_VERSION_V1 {
+        return action_seq_incompatible(ERROR_REPLAY_CAPSULE_FORMAT, capsule.format_version)
+    }
+    if capsule.algorithm_version != GENERATION_ALGORITHM_VERSION_V1 {
+        return action_seq_incompatible(ERROR_REPLAY_ALGORITHM_VERSION, capsule.algorithm_version)
+    }
+    if capsule.edge_policy_version != GENERATION_EDGE_POLICY_VERSION_V1 {
+        return action_seq_incompatible(
+            ERROR_REPLAY_EDGE_POLICY_VERSION,
+            capsule.edge_policy_version,
+        )
+    }
+    match validate_run_config_for_codec(config, action_seq_u256_codec_fingerprint()) {
+        Option::Some(error) => {
+            return U256ActionSeqReplayOutcome::ConfigurationError { error }
+        },
+        Option::None => {},
+    }
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return U256ActionSeqReplayOutcome::ConfigurationError { error }
+        },
+        Option::None => {},
+    }
+    if capsule.suite_id != config.suite_id {
+        return action_seq_incompatible(ERROR_REPLAY_SUITE, capsule.suite_id)
+    }
+    if capsule.run_namespace != config.namespace {
+        return action_seq_incompatible(ERROR_REPLAY_NAMESPACE, capsule.run_namespace)
+    }
+    if capsule.flags != 0 {
+        return action_seq_incompatible(ERROR_REPLAY_FLAGS, capsule.flags)
+    }
+
+    let strategy_fp = u256_action_seq_fingerprint(strategy)
+    let expected_generation = generation_fingerprint(strategy_fp)
+    if capsule.generation_fingerprint != expected_generation {
+        return action_seq_incompatible(
+            ERROR_REPLAY_GENERATION_FINGERPRINT,
+            capsule.generation_fingerprint,
+        )
+    }
+    let expected_run = run_fingerprint(expected_generation, config)
+    if capsule.run_fingerprint != expected_run {
+        return action_seq_incompatible(ERROR_REPLAY_RUN_FINGERPRINT, capsule.run_fingerprint)
+    }
+    let expected_attempt_identity = attempt_seed(
+        capsule.master_seed,
+        capsule.attempt_index,
+        expected_generation,
+    )
+    if capsule.attempt_identity != expected_attempt_identity {
+        return action_seq_incompatible(ERROR_REPLAY_ATTEMPT_IDENTITY, capsule.attempt_identity)
+    }
+    match replay_run_stats_error_for_evidence(
+        config,
+        capsule.attempt_index,
+        capsule.run_stats,
+        capsule.shrink_stats,
+    ) {
+        Option::Some(error) => {
+            return U256ActionSeqReplayOutcome::Incompatible { error }
+        },
+        Option::None => {},
+    }
+
+    let original = match generate_u256_action_seq_attempt(
+        strategy,
+        capsule.master_seed,
+        expected_generation,
+        capsule.attempt_index,
+    ) {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(error) => {
+            return U256ActionSeqReplayOutcome::ReplayInfrastructureError { error }
+        },
+    }
+    let observed_original_digest = match u256_action_seq_digest(strategy, original) {
+        Result::Ok(digest) => digest,
+        Result::Err(error) => {
+            return U256ActionSeqReplayOutcome::ReplayInfrastructureError { error }
+        },
+    }
+    if observed_original_digest != capsule.original_digest {
+        return U256ActionSeqReplayOutcome::OriginalDigestMismatch {
+            expected: capsule.original_digest,
+            observed: observed_original_digest,
+        }
+    }
+
+    match property(original) {
+        PropertyVerdict::Pass => U256ActionSeqReplayOutcome::FailureNotObserved,
+        PropertyVerdict::Discard => U256ActionSeqReplayOutcome::ReplayInputDiscarded,
+        PropertyVerdict::InfrastructureError(error) => {
+            U256ActionSeqReplayOutcome::ReplayInfrastructureError { error }
+        },
+        PropertyVerdict::Fail(observed_failure) => {
+            if !failure_key_equal(observed_failure, capsule.failure_key) {
+                return U256ActionSeqReplayOutcome::FailureKeyMismatch {
+                    expected: capsule.failure_key,
+                    observed: observed_failure,
+                }
+            }
+
+            match shrink_u256_action_seq_prevalidated(
+                strategy,
+                original,
+                capsule.failure_key,
+                config.max_shrink_evaluations,
+                property,
+            ) {
+                U256ActionSeqShrinkResult::InfrastructureError { error, stats: _ } => {
+                    U256ActionSeqReplayOutcome::ReplayInfrastructureError { error }
+                },
+                U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+                    let observed_reduced_digest = match u256_action_seq_digest(strategy, minimal) {
+                        Result::Ok(digest) => digest,
+                        Result::Err(error) => {
+                            return U256ActionSeqReplayOutcome::ReplayInfrastructureError { error }
+                        },
+                    }
+                    if observed_reduced_digest != capsule.reduced_digest {
+                        return U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_REDUCED_DIGEST,
+                        }
+                    }
+                    if !shrink_stats_equal(stats, capsule.shrink_stats) {
+                        return U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_SHRINK_STATS,
+                        }
+                    }
+                    if !shrink_status_equal(status, capsule.shrink_status) {
+                        return U256ActionSeqReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_SHRINK_STATUS,
+                        }
+                    }
+                    U256ActionSeqReplayOutcome::Reproduced {
+                        original,
+                        minimal,
+                        shrink: stats,
+                        shrink_status: status,
+                    }
+                },
+            }
+        },
+    }
+}
+
+/// Public sequence replay accepts only an effect-free property type.
+pub fn replay_u256_action_seq_capsule<const N: usize, P: PureU256ActionSeqProperty<N>>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ config: RunConfig,
+    _ capsule: U256ActionSeqReplayCapsule,
+    _ property: P,
+) -> U256ActionSeqReplayOutcome<N> {
+    let callable: PureU256ActionSeqCallable<N, P> = PureU256ActionSeqCallable { property }
+    replay_u256_action_seq_capsule_with_callable(strategy, config, capsule, callable)
+}

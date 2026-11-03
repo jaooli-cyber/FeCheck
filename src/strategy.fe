@@ -60,7 +60,7 @@ pub struct U256Range { pub lo: u256, pub hi: u256, pub origin: u256 }
 impl Copy for U256Range {}
 
 #[arithmetic(unchecked)]
-fn bounded_uniform(_ upper: u256) -> GenerationResult<u256>
+pub(ingot) fn bounded_uniform(_ upper: u256) -> GenerationResult<u256>
 uses (rng: mut Rng)
 {
     if upper == 0 {

@@ -1,0 +1,302 @@
+use super::action_seq::{
+    ActionSeq,
+    U256ActionSeqShrinkStep,
+    U256ActionSeqStrategy,
+    action_seq_u256_descriptor,
+    generate_u256_action_seq_attempt,
+    u256_action_seq_contains,
+    u256_action_seq_fingerprint,
+    u256_action_seq_rank_less,
+    u256_action_seq_shrink_next,
+    u256_action_seq_shrink_start,
+    u256_action_seq_validate,
+}
+use super::codec::action_seq_u256_codec_fingerprint
+use super::outcome::{
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::pure_runner::{
+    ERROR_INVALID_SHRINK_CANDIDATE,
+    ERROR_LIMIT_TOO_LARGE,
+    MAX_SHRINK_EVALUATIONS_V1,
+    empty_run_stats,
+    empty_shrink_stats,
+    validate_run_config_for_codec,
+}
+use super::replay::{RunConfig, generation_fingerprint}
+use super::strategy::GenerationResult
+
+/// Effect-free property boundary for a fixed-capacity u256 action sequence.
+pub trait PureU256ActionSeqProperty<const N: usize>: Copy {
+    fn evaluate(self, _ value: ActionSeq<u256, N>) -> PropertyVerdict
+}
+
+pub(ingot) struct PureU256ActionSeqCallable<const N: usize, P: PureU256ActionSeqProperty<N>> {
+    pub property: P,
+}
+
+impl<const N: usize, P: PureU256ActionSeqProperty<N>> Fn(ActionSeq<
+    u256,
+    N,
+>) -> _ for PureU256ActionSeqCallable<N, P> {
+    uses E = ()
+    type Out = PropertyVerdict
+
+    fn call(self, _ value: ActionSeq<u256, N>) -> PropertyVerdict {
+        self.property.evaluate(value)
+    }
+}
+
+pub enum U256ActionSeqShrinkResult<const N: usize> {
+    Complete {
+        pub minimal: ActionSeq<u256, N>,
+        pub stats: ShrinkStats,
+        pub status: ShrinkStatus,
+    },
+    InfrastructureError {
+        pub error: ErrorCode,
+        pub stats: ShrinkStats,
+    },
+}
+
+impl<const N: usize> Copy for U256ActionSeqShrinkResult<N> {}
+
+fn action_seq_shrink_infrastructure<const N: usize>(
+    _ error: ErrorCode,
+    _ stats: ShrinkStats,
+) -> U256ActionSeqShrinkResult<N> {
+    U256ActionSeqShrinkResult::InfrastructureError { error, stats }
+}
+
+fn action_seq_descriptor_or_zero<const N: usize>(_ value: ActionSeq<u256, N>) -> u256 {
+    match action_seq_u256_descriptor(value) {
+        Result::Ok(descriptor) => descriptor,
+        Result::Err(_) => 0,
+    }
+}
+
+/// Low-level sequence shrink primitive. The caller must already have observed
+/// `original` fail with exactly `failure`.
+pub(ingot) fn shrink_u256_action_seq_prevalidated<
+    const N: usize,
+    P: Fn(ActionSeq<u256, N>) -> PropertyVerdict,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ original: ActionSeq<u256, N>,
+    _ failure: FailureKey,
+    _ max_evaluations: u256,
+    _ property: P,
+) -> U256ActionSeqShrinkResult<N>
+uses P::E
+{
+    var stats = empty_shrink_stats()
+    if max_evaluations > MAX_SHRINK_EVALUATIONS_V1 {
+        return action_seq_shrink_infrastructure(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: max_evaluations },
+            stats,
+        )
+    }
+
+    var current = original
+    var cursor = match u256_action_seq_shrink_start(strategy, current) {
+        Result::Ok(cursor) => cursor,
+        Result::Err(error) => {
+            return action_seq_shrink_infrastructure(error, stats)
+        },
+    }
+
+    while true {
+        match u256_action_seq_shrink_next(cursor) {
+            U256ActionSeqShrinkStep::Done => {
+                return U256ActionSeqShrinkResult::Complete {
+                    minimal: current,
+                    stats,
+                    status: ShrinkStatus::CompleteLocal,
+                }
+            },
+            U256ActionSeqShrinkStep::Candidate { value, cursor: next } => {
+                if stats.evaluations == max_evaluations {
+                    return U256ActionSeqShrinkResult::Complete {
+                        minimal: current,
+                        stats,
+                        status: ShrinkStatus::PartialBudget,
+                    }
+                }
+                if !u256_action_seq_contains(strategy, value) {
+                    return action_seq_shrink_infrastructure(
+                        ErrorCode {
+                            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+                            detail: action_seq_descriptor_or_zero(value),
+                        },
+                        stats,
+                    )
+                }
+                let decreases = match u256_action_seq_rank_less(strategy, value, current) {
+                    Result::Ok(decreases) => decreases,
+                    Result::Err(error) => {
+                        return action_seq_shrink_infrastructure(error, stats)
+                    },
+                }
+                if !decreases {
+                    return action_seq_shrink_infrastructure(
+                        ErrorCode {
+                            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+                            detail: action_seq_descriptor_or_zero(value),
+                        },
+                        stats,
+                    )
+                }
+
+                stats.evaluations += 1
+                match property(value) {
+                    PropertyVerdict::Pass => {
+                        stats.rejected_pass += 1
+                        cursor = next
+                    },
+                    PropertyVerdict::Discard => {
+                        stats.rejected_discard += 1
+                        cursor = next
+                    },
+                    PropertyVerdict::Fail(candidate_failure) => {
+                        if failure_key_equal(candidate_failure, failure) {
+                            stats.accepted += 1
+                            current = value
+                            cursor = match u256_action_seq_shrink_start(strategy, current) {
+                                Result::Ok(restarted) => restarted,
+                                Result::Err(error) => {
+                                    return action_seq_shrink_infrastructure(error, stats)
+                                },
+                            }
+                        } else {
+                            stats.rejected_failure_key += 1
+                            cursor = next
+                        }
+                    },
+                    PropertyVerdict::InfrastructureError(error) => {
+                        return action_seq_shrink_infrastructure(error, stats)
+                    },
+                }
+            },
+        }
+    }
+
+    action_seq_shrink_infrastructure(
+        ErrorCode {
+            kind: ERROR_INVALID_SHRINK_CANDIDATE,
+            detail: action_seq_descriptor_or_zero(current),
+        },
+        stats,
+    )
+}
+
+fn action_seq_configuration_error<const N: usize>(_ error: ErrorCode) -> RunOutcome<
+    ActionSeq<u256, N>,
+> {
+    RunOutcome::ConfigurationError { error, stats: empty_run_stats() }
+}
+
+/// Ingot-only callable runner used for controlled instrumentation.
+pub(ingot) fn check_u256_action_seq_with_callable<
+    const N: usize,
+    P: Fn(ActionSeq<u256, N>) -> PropertyVerdict,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> RunOutcome<ActionSeq<u256, N>>
+uses P::E
+{
+    match validate_run_config_for_codec(config, action_seq_u256_codec_fingerprint()) {
+        Option::Some(error) => {
+            return action_seq_configuration_error(error)
+        },
+        Option::None => {},
+    }
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return action_seq_configuration_error(error)
+        },
+        Option::None => {},
+    }
+
+    var stats = empty_run_stats()
+    if config.target_valid_cases == 0 {
+        return RunOutcome::Passed { stats }
+    }
+
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    while stats.valid_cases < config.target_valid_cases {
+        let value = match generate_u256_action_seq_attempt(
+            strategy,
+            master_seed,
+            generation,
+            stats.attempts,
+        ) {
+            GenerationResult::Value(value) => value,
+            GenerationResult::InfrastructureError(error) => {
+                return RunOutcome::InfrastructureError { error, stats }
+            },
+        }
+        stats.attempts += 1
+        stats.property_evaluations += 1
+
+        match property(value) {
+            PropertyVerdict::Pass => stats.valid_cases += 1,
+            PropertyVerdict::Discard => {
+                stats.discards += 1
+                if stats.discards > config.max_discards {
+                    return RunOutcome::Exhausted { reason: ExhaustionReason::MaxDiscards, stats }
+                }
+            },
+            PropertyVerdict::InfrastructureError(error) => {
+                return RunOutcome::InfrastructureError { error, stats }
+            },
+            PropertyVerdict::Fail(failure) => {
+                match shrink_u256_action_seq_prevalidated(
+                    strategy,
+                    value,
+                    failure,
+                    config.max_shrink_evaluations,
+                    property,
+                ) {
+                    U256ActionSeqShrinkResult::Complete { minimal, stats: shrink, status } => {
+                        stats.property_evaluations += shrink.evaluations
+                        return RunOutcome::Falsified {
+                            original: value,
+                            minimal,
+                            failure,
+                            stats,
+                            shrink,
+                            shrink_status: status,
+                        }
+                    },
+                    U256ActionSeqShrinkResult::InfrastructureError { error, stats: shrink } => {
+                        stats.property_evaluations += shrink.evaluations
+                        return RunOutcome::InfrastructureError { error, stats }
+                    },
+                }
+            },
+        }
+    }
+
+    RunOutcome::Passed { stats }
+}
+
+/// Deterministic sequence runner whose public type excludes effectful properties.
+pub fn check_u256_action_seq_pure<const N: usize, P: PureU256ActionSeqProperty<N>>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> RunOutcome<ActionSeq<u256, N>> {
+    let callable: PureU256ActionSeqCallable<N, P> = PureU256ActionSeqCallable { property }
+    check_u256_action_seq_with_callable(strategy, master_seed, config, callable)
+}

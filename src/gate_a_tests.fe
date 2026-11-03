@@ -1,8 +1,13 @@
 use ingot::{
     ActionSeq,
+    ErrorCode,
     FailureKey,
     PropertyVerdict,
+    action_seq_empty,
+    action_seq_get,
     action_seq_is_valid,
+    action_seq_len,
+    action_seq_try_new,
     action_seq_u256_digest_spike,
     evaluate_property,
     verdict_tag,
@@ -10,10 +15,33 @@ use ingot::{
 
 struct EvalCounter { count: u256 }
 
-fn expect_action_digest(_ result: Result<ingot::ErrorCode, u256>) -> u256 {
+fn expect_action_digest(_ result: Result<ErrorCode, u256>) -> u256 {
     match result {
         Result::Ok(digest) => digest,
         Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_sequence<const N: usize>(_ result: Result<ErrorCode, ActionSeq<u256, N>>) -> ActionSeq<
+    u256,
+    N,
+> {
+    match result {
+        Result::Ok(sequence) => sequence,
+        Result::Err(_) => {
+            assert!(false)
+            action_seq_empty(0)
+        },
+    }
+}
+
+fn expect_item(_ item: Option<u256>) -> u256 {
+    match item {
+        Option::Some(value) => value,
+        Option::None => {
             assert!(false)
             0
         },
@@ -50,16 +78,16 @@ fn property_callable_forwards_pure_and_effectful_rows() {
 
 #[test]
 fn action_sequence_is_copy_bounded_and_tail_independent() {
-    let left = ActionSeq<u256, 4> { items: [7, 9, 111, 222], len: 2 }
-    let right = ActionSeq<u256, 4> { items: [7, 9, 333, 444], len: 2 }
-    let changed = ActionSeq<u256, 4> { items: [7, 8, 111, 222], len: 2 }
+    let left = expect_sequence(action_seq_try_new([7, 9, 111, 222], 2))
+    let right = expect_sequence(action_seq_try_new([7, 9, 333, 444], 2))
+    let changed = expect_sequence(action_seq_try_new([7, 8, 111, 222], 2))
     let copied = left
 
     assert!(action_seq_is_valid(left, 2))
     assert!(!action_seq_is_valid(left, 1))
     assert!(!action_seq_is_valid(left, 5))
-    assert!(copied.items[0] == 7)
-    assert!(copied.len == 2)
+    assert!(expect_item(action_seq_get(copied, 0)) == 7)
+    assert!(action_seq_len(copied) == 2)
     assert!(
         expect_action_digest(action_seq_u256_digest_spike(left))
             == expect_action_digest(action_seq_u256_digest_spike(right)),
@@ -69,12 +97,12 @@ fn action_sequence_is_copy_bounded_and_tail_independent() {
             != expect_action_digest(action_seq_u256_digest_spike(changed)),
     )
 
-    let same_logical = ActionSeq<u256, 5> { items: [7, 9, 1, 2, 3], len: 2 }
+    let same_logical = expect_sequence(action_seq_try_new([7, 9, 1, 2, 3], 2))
     assert!(
         expect_action_digest(action_seq_u256_digest_spike(left))
             == expect_action_digest(action_seq_u256_digest_spike(same_logical)),
     )
 
-    let invalid = ActionSeq<u256, 1> { items: [7], len: 2 }
-    assert!(action_seq_u256_digest_spike(invalid).is_err())
+    let invalid: Result<ErrorCode, ActionSeq<u256, 1>> = action_seq_try_new([7], 2)
+    assert!(invalid.is_err())
 }

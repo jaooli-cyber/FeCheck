@@ -1,13 +1,77 @@
+use super::codec::{
+    action_seq_u256_logical_descriptor,
+    canonical_action_seq_u256_value_digest,
+    canonical_strategy_fingerprint,
+    ordered_edges_descriptor,
+}
 use super::outcome::ErrorCode
+use super::replay::{attempt_seed, generation_fingerprint}
+use super::scalar::{ScalarShrinkCursor, ScalarShrinkStep, scalar_shrink_next, scalar_shrink_start}
+use super::strategy::{
+    EDGE_ENUMERATION_POLICY_V1,
+    GenerationResult,
+    SHRINK_ENUMERATION_POLICY_V1,
+    Strategy,
+    U256Range,
+    VALUE_ENCODING_VERSION_V1,
+    bounded_uniform,
+    generate,
+}
 use std::evm::keccak_words
+use std::evm::random::{KeccakRng, ReplayRng, Rng}
 
 pub const ERROR_INVALID_ACTION_SEQUENCE: u256 = 100
+pub const ERROR_INVALID_ACTION_SEQ_CAPACITY: u256 = 101
+pub const ERROR_INVALID_ACTION_SEQ_MAX_ACTIONS: u256 = 102
+pub const ERROR_INVALID_ACTION_SEQ_BLOCK: u256 = 103
+pub const ERROR_INVALID_ACTION_SEQ_VALUE: u256 = 104
+pub const ERROR_INVALID_ACTION_SEQ_EDGE: u256 = 105
+pub const ERROR_ACTION_SEQ_GENERATION_MISMATCH: u256 = 106
+
+pub const MAX_ACTION_SEQ_CAPACITY_V1: usize = 4
+pub const STRATEGY_KIND_ACTION_SEQ_U256_V1: u256 = 3
 
 const DOMAIN_ACTION_SEQ_SPIKE_V0: u256 = 0x4645434845434b2f5350494b452f414354494f4e5345512f5630000000000000
 
-pub struct ActionSeq<A, const N: usize> { pub items: [A; N], pub len: usize }
+/// Fixed storage with a private logical prefix: callers cannot observe the tail.
+pub struct ActionSeq<A, const N: usize> { items: [A; N], len: usize }
 
 impl<A, const N: usize> Copy for ActionSeq<A, N> where A: Copy {}
+
+pub fn action_seq_empty<A, const N: usize>(_ origin: A) -> ActionSeq<A, N>
+where A: Copy
+{
+    ActionSeq { items: [origin; N], len: 0 }
+}
+
+pub fn action_seq_try_new<A, const N: usize>(_ items: [A; N], _ len: usize) -> Result<
+    ErrorCode,
+    ActionSeq<A, N>,
+>
+where A: Copy
+{
+    if len > N {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQUENCE, detail: len as u256 },
+        )
+    }
+    Result::Ok(ActionSeq { items, len })
+}
+
+pub fn action_seq_len<A, const N: usize>(_ sequence: ActionSeq<A, N>) -> usize
+where A: Copy
+{
+    sequence.len
+}
+
+pub fn action_seq_get<A, const N: usize>(_ sequence: ActionSeq<A, N>, _ index: usize) -> Option<A>
+where A: Copy
+{
+    if index >= sequence.len {
+        return Option::None
+    }
+    Option::Some(sequence.items[index])
+}
 
 pub fn action_seq_is_valid<A, const N: usize>(
     _ sequence: ActionSeq<A, N>,
@@ -18,8 +82,38 @@ where A: Copy
     sequence.len <= max_actions && max_actions <= N
 }
 
-/// Non-wire feasibility spike. It proves logical tail independence but is not
-/// the canonical replay codec; the stateful ActionSeq codec remains pending.
+pub fn action_seq_u256_logical_equal<const N: usize>(
+    _ left: ActionSeq<u256, N>,
+    _ right: ActionSeq<u256, N>,
+) -> bool {
+    if left.len != right.len {
+        return false
+    }
+    var index: usize = 0
+    while index < left.len {
+        if left.items[index] != right.items[index] {
+            return false
+        }
+        index += 1
+    }
+    true
+}
+
+pub fn action_seq_u256_descriptor<const N: usize>(_ sequence: ActionSeq<u256, N>) -> Result<
+    ErrorCode,
+    u256,
+> {
+    if sequence.len > N {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQUENCE, detail: sequence.len as u256 },
+        )
+    }
+    Result::Ok(
+        action_seq_u256_logical_descriptor(sequence.len, sequence.items),
+    )
+}
+
+/// Non-wire feasibility spike retained only to reproduce old evidence.
 pub fn action_seq_u256_digest_spike<const N: usize>(_ sequence: ActionSeq<u256, N>) -> Result<
     ErrorCode,
     u256,
@@ -29,7 +123,6 @@ pub fn action_seq_u256_digest_spike<const N: usize>(_ sequence: ActionSeq<u256, 
             ErrorCode { kind: ERROR_INVALID_ACTION_SEQUENCE, detail: sequence.len as u256 },
         )
     }
-
     var digest = keccak_words([DOMAIN_ACTION_SEQ_SPIKE_V0, sequence.len as u256])
     var index: usize = 0
     while index < sequence.len {
@@ -37,4 +130,559 @@ pub fn action_seq_u256_digest_spike<const N: usize>(_ sequence: ActionSeq<u256, 
         index += 1
     }
     Result::Ok(digest)
+}
+
+pub struct U256ActionSeqStrategy<const N: usize> { pub action: U256Range, pub max_actions: usize }
+
+impl<const N: usize> Copy for U256ActionSeqStrategy<N> {}
+
+pub fn u256_action_seq_validate<const N: usize>(_ strategy: U256ActionSeqStrategy<N>) -> Option<
+    ErrorCode,
+> {
+    if N > MAX_ACTION_SEQ_CAPACITY_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_CAPACITY, detail: N as u256 },
+        )
+    }
+    if strategy.max_actions > N {
+        return Option::Some(
+            ErrorCode {
+                kind: ERROR_INVALID_ACTION_SEQ_MAX_ACTIONS,
+                detail: strategy.max_actions as u256,
+            },
+        )
+    }
+    strategy.action.validate()
+}
+
+pub fn u256_action_seq_contains<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+) -> bool {
+    if u256_action_seq_validate(strategy).is_some() || sequence.len > strategy.max_actions {
+        return false
+    }
+    var index: usize = 0
+    while index < sequence.len {
+        if !strategy.action.contains(sequence.items[index]) {
+            return false
+        }
+        index += 1
+    }
+    true
+}
+
+pub fn u256_action_seq_origin<const N: usize>(_ strategy: U256ActionSeqStrategy<N>) -> ActionSeq<
+    u256,
+    N,
+> {
+    ActionSeq { items: [strategy.action.origin; N], len: 0 }
+}
+
+fn descriptor_or_zero<const N: usize>(_ sequence: ActionSeq<u256, N>) -> u256 {
+    match action_seq_u256_descriptor(sequence) {
+        Result::Ok(digest) => digest,
+        Result::Err(_) => 0,
+    }
+}
+
+pub fn u256_action_seq_edge_count<const N: usize>(_ strategy: U256ActionSeqStrategy<N>) -> u256 {
+    if u256_action_seq_validate(strategy).is_some() {
+        return 0
+    }
+    if strategy.max_actions == 0 {
+        return 1
+    }
+    if strategy.max_actions == 1 {
+        return 2
+    }
+    3
+}
+
+pub fn u256_action_seq_edge_at<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ edge_index: u256,
+) -> GenerationResult<ActionSeq<u256, N>> {
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return GenerationResult::InfrastructureError(error)
+        },
+        Option::None => {},
+    }
+    let count = u256_action_seq_edge_count(strategy)
+    if edge_index >= count {
+        return GenerationResult::InfrastructureError(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_EDGE, detail: edge_index },
+        )
+    }
+    var len: usize = 0
+    if edge_index == 1 { len = 1 }
+    if edge_index == 2 {
+        len = strategy.max_actions
+    }
+    GenerationResult::Value(ActionSeq { items: [strategy.action.origin; N], len })
+}
+
+pub fn u256_action_seq_fingerprint<const N: usize>(_ strategy: U256ActionSeqStrategy<N>) -> u256 {
+    let empty = u256_action_seq_origin(strategy)
+    var edge1_descriptor: u256 = 0
+    var edge2_descriptor: u256 = 0
+    if strategy.max_actions > 0 && strategy.max_actions <= N {
+        edge1_descriptor = descriptor_or_zero(
+            ActionSeq { items: [strategy.action.origin; N], len: 1 },
+        )
+    }
+    if strategy.max_actions > 1 && strategy.max_actions <= N {
+        edge2_descriptor = descriptor_or_zero(
+            ActionSeq { items: [strategy.action.origin; N], len: strategy.max_actions },
+        )
+    }
+    canonical_strategy_fingerprint(
+        STRATEGY_KIND_ACTION_SEQ_U256_V1,
+        0,
+        descriptor_or_zero(empty),
+        N as u256,
+        strategy.max_actions as u256,
+        strategy.action.fingerprint(),
+        ordered_edges_descriptor(
+            u256_action_seq_edge_count(strategy),
+            descriptor_or_zero(empty),
+            edge1_descriptor,
+            edge2_descriptor,
+        ),
+        EDGE_ENUMERATION_POLICY_V1,
+        SHRINK_ENUMERATION_POLICY_V1,
+        VALUE_ENCODING_VERSION_V1,
+    )
+}
+
+pub fn u256_action_seq_digest<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+) -> Result<ErrorCode, u256> {
+    if !u256_action_seq_contains(strategy, sequence) {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_VALUE, detail: sequence.len as u256 },
+        )
+    }
+    Result::Ok(
+        canonical_action_seq_u256_value_digest(
+            u256_action_seq_fingerprint(strategy),
+            sequence.len,
+            sequence.items,
+        ),
+    )
+}
+
+pub(ingot) fn u256_action_seq_random<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+) -> GenerationResult<ActionSeq<u256, N>>
+uses (rng: mut Rng)
+{
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return GenerationResult::InfrastructureError(error)
+        },
+        Option::None => {},
+    }
+    let len = match bounded_uniform(strategy.max_actions as u256 + 1) {
+        GenerationResult::Value(value) => value as usize,
+        GenerationResult::InfrastructureError(error) => {
+            return GenerationResult::InfrastructureError(error)
+        },
+    }
+    var items = [strategy.action.origin; N]
+    var index: usize = 0
+    while index < N {
+        match generate(strategy.action) {
+            GenerationResult::Value(value) => items[index] = value,
+            GenerationResult::InfrastructureError(error) => {
+                return GenerationResult::InfrastructureError(error)
+            },
+        }
+        index += 1
+    }
+    GenerationResult::Value(ActionSeq { items, len })
+}
+
+pub fn generate_u256_action_seq_attempt<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ generation: u256,
+    _ attempt_index: u256,
+) -> GenerationResult<ActionSeq<u256, N>> {
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return GenerationResult::InfrastructureError(error)
+        },
+        Option::None => {},
+    }
+    let expected = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    if generation != expected {
+        return GenerationResult::InfrastructureError(
+            ErrorCode { kind: ERROR_ACTION_SEQ_GENERATION_MISMATCH, detail: generation },
+        )
+    }
+    let edge_count = u256_action_seq_edge_count(strategy)
+    if attempt_index < edge_count {
+        return u256_action_seq_edge_at(strategy, attempt_index)
+    }
+    var rng = KeccakRng::seeded(attempt_seed(master_seed, attempt_index, generation))
+    with (Rng = rng) {
+        u256_action_seq_random(strategy)
+    }
+}
+
+fn action_seq_u256_delete_block_unchecked<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+    _ block_len: usize,
+    _ start: usize,
+) -> ActionSeq<u256, N> {
+    var items = [strategy.action.origin; N]
+    var source: usize = 0
+    var destination: usize = 0
+    while source < sequence.len {
+        if source < start || source >= start + block_len {
+            items[destination] = sequence.items[source]
+            destination += 1
+        }
+        source += 1
+    }
+    ActionSeq { items, len: sequence.len - block_len }
+}
+
+pub fn action_seq_u256_delete_block<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+    _ block_len: usize,
+    _ start: usize,
+) -> Result<ErrorCode, ActionSeq<u256, N>> {
+    if !u256_action_seq_contains(strategy, sequence) {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_VALUE, detail: sequence.len as u256 },
+        )
+    }
+    if block_len == 0 || block_len > sequence.len {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_BLOCK, detail: block_len as u256 },
+        )
+    }
+    if start > sequence.len - block_len {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_BLOCK, detail: start as u256 },
+        )
+    }
+    Result::Ok(
+        action_seq_u256_delete_block_unchecked(strategy, sequence, block_len, start),
+    )
+}
+
+pub enum U256ActionSeqShrinkCursor<const N: usize> {
+    Blocks {
+        strategy: U256ActionSeqStrategy<N>,
+        source: ActionSeq<u256, N>,
+        block_len: usize,
+        start: usize,
+    },
+    Arguments {
+        strategy: U256ActionSeqStrategy<N>,
+        source: ActionSeq<u256, N>,
+        action_index: usize,
+        scalar: ScalarShrinkCursor,
+    },
+    Done,
+}
+
+impl<const N: usize> Copy for U256ActionSeqShrinkCursor<N> {}
+
+pub enum U256ActionSeqShrinkStep<const N: usize> {
+    Done,
+    Candidate {
+        pub value: ActionSeq<u256, N>,
+        pub cursor: U256ActionSeqShrinkCursor<N>,
+    },
+}
+
+impl<const N: usize> Copy for U256ActionSeqShrinkStep<N> {}
+
+fn u256_action_seq_argument_cursor<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ source: ActionSeq<u256, N>,
+    _ action_index: usize,
+) -> U256ActionSeqShrinkCursor<N> {
+    if action_index >= source.len {
+        return U256ActionSeqShrinkCursor::Done
+    }
+    U256ActionSeqShrinkCursor::Arguments {
+        strategy,
+        source,
+        action_index,
+        scalar: scalar_shrink_start(strategy.action.origin, source.items[action_index]),
+    }
+}
+
+fn u256_action_seq_after_block<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ source: ActionSeq<u256, N>,
+    _ block_len: usize,
+    _ start: usize,
+) -> U256ActionSeqShrinkCursor<N> {
+    if start < source.len - block_len {
+        return U256ActionSeqShrinkCursor::Blocks { strategy, source, block_len, start: start + 1 }
+    }
+    if block_len > 1 {
+        return U256ActionSeqShrinkCursor::Blocks {
+            strategy,
+            source,
+            block_len: block_len - 1,
+            start: 0,
+        }
+    }
+    u256_action_seq_argument_cursor(strategy, source, 0)
+}
+
+fn u256_action_seq_block_is_duplicate<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ source: ActionSeq<u256, N>,
+    _ block_len: usize,
+    _ start: usize,
+    _ candidate: ActionSeq<u256, N>,
+) -> bool {
+    var previous_start: usize = 0
+    while previous_start < start {
+        let previous = action_seq_u256_delete_block_unchecked(
+            strategy,
+            source,
+            block_len,
+            previous_start,
+        )
+        if action_seq_u256_logical_equal(previous, candidate) {
+            return true
+        }
+        previous_start += 1
+    }
+    false
+}
+
+pub fn u256_action_seq_shrink_start<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ sequence: ActionSeq<u256, N>,
+) -> Result<ErrorCode, U256ActionSeqShrinkCursor<N>> {
+    if !u256_action_seq_contains(strategy, sequence) {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_VALUE, detail: sequence.len as u256 },
+        )
+    }
+    if sequence.len == 0 {
+        return Result::Ok(U256ActionSeqShrinkCursor::Done)
+    }
+    Result::Ok(
+        U256ActionSeqShrinkCursor::Blocks {
+            strategy,
+            source: sequence,
+            block_len: sequence.len,
+            start: 0,
+        },
+    )
+}
+
+pub fn u256_action_seq_shrink_next<const N: usize>(
+    _ cursor: U256ActionSeqShrinkCursor<N>,
+) -> U256ActionSeqShrinkStep<N> {
+    var state = cursor
+    while true {
+        match state {
+            U256ActionSeqShrinkCursor::Done => {
+                return U256ActionSeqShrinkStep::Done
+            },
+            U256ActionSeqShrinkCursor::Blocks { strategy, source, block_len, start } => {
+                let candidate = action_seq_u256_delete_block_unchecked(
+                    strategy,
+                    source,
+                    block_len,
+                    start,
+                )
+                let next = u256_action_seq_after_block(strategy, source, block_len, start)
+                if u256_action_seq_block_is_duplicate(
+                    strategy,
+                    source,
+                    block_len,
+                    start,
+                    candidate,
+                ) {
+                    state = next
+                } else {
+                    return U256ActionSeqShrinkStep::Candidate { value: candidate, cursor: next }
+                }
+            },
+            U256ActionSeqShrinkCursor::Arguments { strategy, source, action_index, scalar } => {
+                match scalar_shrink_next(scalar) {
+                    ScalarShrinkStep::Done => {
+                        state = u256_action_seq_argument_cursor(strategy, source, action_index + 1)
+                    },
+                    ScalarShrinkStep::Candidate { value, cursor: next_scalar } => {
+                        var items = source.items
+                        items[action_index] = value
+                        return U256ActionSeqShrinkStep::Candidate {
+                            value: ActionSeq { items, len: source.len },
+                            cursor: U256ActionSeqShrinkCursor::Arguments {
+                                strategy,
+                                source,
+                                action_index,
+                                scalar: next_scalar,
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    U256ActionSeqShrinkStep::Done
+}
+
+/// Exact order: logical length, then action ranks from left to right.
+pub fn u256_action_seq_rank_less<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ candidate: ActionSeq<u256, N>,
+    _ current: ActionSeq<u256, N>,
+) -> Result<ErrorCode, bool> {
+    if !u256_action_seq_contains(strategy, candidate) {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_VALUE, detail: candidate.len as u256 },
+        )
+    }
+    if !u256_action_seq_contains(strategy, current) {
+        return Result::Err(
+            ErrorCode { kind: ERROR_INVALID_ACTION_SEQ_VALUE, detail: current.len as u256 },
+        )
+    }
+    if candidate.len < current.len {
+        return Result::Ok(true)
+    }
+    if candidate.len > current.len {
+        return Result::Ok(false)
+    }
+    var index: usize = 0
+    while index < candidate.len {
+        let candidate_rank = match strategy.action.rank(candidate.items[index]) {
+            Result::Ok(rank) => rank,
+            Result::Err(error) => {
+                return Result::Err(error)
+            },
+        }
+        let current_rank = match strategy.action.rank(current.items[index]) {
+            Result::Ok(rank) => rank,
+            Result::Err(error) => {
+                return Result::Err(error)
+            },
+        }
+        if candidate_rank < current_rank {
+            return Result::Ok(true)
+        }
+        if candidate_rank > current_rank {
+            return Result::Ok(false)
+        }
+        index += 1
+    }
+    Result::Ok(false)
+}
+
+#[test]
+fn action_seq_random_consumes_length_then_every_physical_slot() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 3,
+    }
+    var replay = ReplayRng::new([3, 11, 22, 33, 44])
+    let sequence = with (Rng = replay) {
+        match u256_action_seq_random(strategy) {
+            GenerationResult::Value(value) => value,
+            GenerationResult::InfrastructureError(_) => {
+                assert!(false)
+                action_seq_empty(0)
+            },
+        }
+    }
+
+    assert!(sequence.len == 3)
+    assert!(sequence.items[0] == 11)
+    assert!(sequence.items[1] == 22)
+    assert!(sequence.items[2] == 33)
+    assert!(replay.next() == 44)
+
+    // Length zero is the critical case: inactive logical output must still
+    // consume and initialize every physical slot.
+    var replay_zero = ReplayRng::new([0, 51, 52, 53, 54])
+    let empty = with (Rng = replay_zero) {
+        match u256_action_seq_random(strategy) {
+            GenerationResult::Value(value) => value,
+            GenerationResult::InfrastructureError(_) => {
+                assert!(false)
+                action_seq_empty(0)
+            },
+        }
+    }
+    assert!(empty.len == 0)
+    assert!(empty.items[0] == 51)
+    assert!(empty.items[1] == 52)
+    assert!(empty.items[2] == 53)
+    assert!(replay_zero.next() == 54)
+}
+
+#[test]
+fn random_attempt_three_matches_the_independent_python_oracle_including_hidden_tail() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 3,
+    }
+    let strategy_fingerprint = u256_action_seq_fingerprint(strategy)
+    assert!(
+        strategy_fingerprint == 0x3cf8baee16684205e58c1796c3589d041a0728b86e83d8b87a4f701e65d345a1,
+    )
+    let generation = generation_fingerprint(strategy_fingerprint)
+    assert!(
+        generation == 0x94a41a04931f9cbafadd0f70e7ed096043e0c2b4976268b6023eb42d3558ddda,
+    )
+    let sequence = match generate_u256_action_seq_attempt(strategy, 7, generation, 3) {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            action_seq_empty(0)
+        },
+    }
+
+    assert!(sequence.len == 0)
+    assert!(
+        sequence.items[0] == 0xfccf7da5bd58be4df2b780f5e556e322414f6e706057e12c9c6674f72853241,
+    )
+    assert!(
+        sequence.items[1] == 0xaa0af77cb197663ca41aac83b1f42c88cbafa93f2f39453819eb24fcdd095eb6,
+    )
+    assert!(
+        sequence.items[2] == 0xaf509bc2e136adfcd688139978d9772e09b1e3cec44c209a2cba221005cb4633,
+    )
+    match u256_action_seq_digest(strategy, sequence) {
+        Result::Ok(digest) => {
+            assert!(
+                digest == 0x7a311e9c48901abebd3c7f5e337034c52dbbfd02be8266cb61a827dfe080ee4a,
+            )
+        },
+        Result::Err(_) => assert!(false),
+    }
+}
+
+#[test]
+fn unchecked_block_deletion_initializes_the_physical_tail_to_origin() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 5, hi: 9, origin: 5 },
+        max_actions: 3,
+    }
+    let source = ActionSeq { items: [6, 7, 8], len: 3 }
+    let reduced = action_seq_u256_delete_block_unchecked(strategy, source, 1, 1)
+    assert!(reduced.len == 2)
+    assert!(reduced.items[0] == 6)
+    assert!(reduced.items[1] == 8)
+    assert!(reduced.items[2] == 5)
 }

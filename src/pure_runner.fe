@@ -195,7 +195,10 @@ uses P::E
     )
 }
 
-pub(ingot) fn validate_run_config(_ config: RunConfig) -> Option<ErrorCode> {
+pub(ingot) fn validate_run_config_for_codec(
+    _ config: RunConfig,
+    _ expected_codec_fingerprint: u256,
+) -> Option<ErrorCode> {
     if config.digest_format_version != DIGEST_FORMAT_VERSION_V1 {
         return Option::Some(
             ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.digest_format_version },
@@ -206,7 +209,7 @@ pub(ingot) fn validate_run_config(_ config: RunConfig) -> Option<ErrorCode> {
             ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.capsule_format_version },
         )
     }
-    if config.codec_fingerprint != u256_codec_fingerprint() {
+    if config.codec_fingerprint != expected_codec_fingerprint {
         return Option::Some(
             ErrorCode { kind: ERROR_UNSUPPORTED_CODEC, detail: config.codec_fingerprint },
         )
@@ -238,6 +241,11 @@ pub(ingot) fn validate_run_config(_ config: RunConfig) -> Option<ErrorCode> {
     }
     Option::None
 }
+
+pub(ingot) fn validate_run_config(_ config: RunConfig) -> Option<ErrorCode> {
+    validate_run_config_for_codec(config, u256_codec_fingerprint())
+}
+
 fn configuration_error(_ error: ErrorCode) -> RunOutcome<u256> {
     RunOutcome::ConfigurationError { error, stats: empty_run_stats() }
 }

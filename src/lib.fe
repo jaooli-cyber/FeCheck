@@ -1,4 +1,6 @@
 pub use action_seq::*
+pub use action_seq_capsule::*
+pub use action_seq_runner::*
 pub use bool_strategy::*
 pub use capsule::*
 pub use codec::*
