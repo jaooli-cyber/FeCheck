@@ -150,11 +150,12 @@ For the scalar `u256` path, the five canonical domain preimage sizes are:
 - `FECHECK/VALUE/V1`: 272 bytes.
 
 `tools/oracle_vectors.py` independently constructs every byte, prints each
-preimage, and verifies 24 Keccak goldens with PyCryptodome 3.23.0. They cover
+preimage, and verifies 25 Keccak goldens with PyCryptodome 3.23.0. They cover
 Bool strategy identities, the scalar seeded full-domain RNG branch, ActionSeq
 logical encoding and dynamic value encoding, zero/one/full edge configurations,
-and the complete seed-plus-four-word random sequence chain. Fe tests also mutate
-every scalar strategy and run field individually.
+the complete seed-plus-four-word random sequence chain, and a sequence run
+fingerprint. Fe tests also mutate every scalar strategy and run field
+individually.
 
 ## Certified replay
 
@@ -274,7 +275,9 @@ Candidate order is exact:
 
 The incremental cursor carries both the validated strategy and its source; the
 next-step API accepts only that cursor, so callers cannot resume enumeration
-under a different strategy. Deletion compacts the active prefix and fills its now-inactive storage with the
+under a different strategy.
+
+Deletion compacts the active prefix and fills its now-inactive storage with the
 action origin. Duplicate block-deletion candidates are suppressed by exact
 logical equality, never by hash. The structural order is
 `(logical length, ordered action ranks)`, compared directly without lossy
@@ -283,9 +286,17 @@ separate reference enumerator, assert in-domain strict rank reduction and
 uniqueness for all sequences over `0..2` through length three, and exercise a
 1,038-candidate Capacity-4 worst case to completion.
 
-The kernel and its exhaustive small-domain tests are implemented. The future
-sequence runner must still preserve the original `FailureKey`, restart phase 1
-after every accepted candidate, enforce exact budgets/counters, and produce and
-replay a certified sequence capsule. Stateful evaluation must additionally
-create a fresh fixture and model for every candidate. Those layers are not yet
-claimed.
+The kernel, exhaustive small-domain tests, and effect-free pure sequence runner
+are implemented. The public runner accepts only
+`PureU256ActionSeqProperty<N>`; an effect-forwarding callable exists only for
+ingot-internal instrumentation. It preserves the original `FailureKey`,
+restarts block deletion after every acceptance, distinguishes
+`CompleteLocal` from `PartialBudget` at the candidate boundary, and maintains
+the same attempt/shrink accounting equations as the scalar runner. A sequence
+run requires `action_seq_u256_codec_fingerprint()`; scalar and sequence codecs
+are rejected across runners before property evaluation. Pure sequence length
+does not increment stateful counters or `actions_executed`.
+
+Certified sequence capsules and direct sequence replay are not yet implemented.
+Stateful evaluation must additionally create a fresh fixture and model for every
+candidate. Those layers are not yet claimed.

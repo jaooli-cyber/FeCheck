@@ -1,0 +1,614 @@
+use ingot::{
+    ActionSeq,
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PureU256ActionSeqProperty,
+    PureU256Property,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    ShrinkStatus,
+    U256ActionSeqShrinkResult,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_empty,
+    action_seq_get,
+    action_seq_len,
+    action_seq_try_new,
+    action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_pure,
+    check_u256_action_seq_with_callable,
+    check_u256_pure,
+    generation_fingerprint,
+    run_fingerprint,
+    shrink_u256_action_seq_prevalidated,
+    u256_action_seq_fingerprint,
+    u256_codec_fingerprint,
+}
+
+struct EvalCounter { count: u256 }
+
+struct LengthTrace { count: usize, lengths: [u256; 16] }
+
+fn sequence_config() -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+fn sequence_strategy() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy { action: U256Range { lo: 0, hi: 3, origin: 0 }, max_actions: 3 }
+}
+
+fn expect_sequence(_ result: Result<ErrorCode, ActionSeq<u256, 3>>) -> ActionSeq<u256, 3> {
+    match result {
+        Result::Ok(sequence) => sequence,
+        Result::Err(_) => {
+            assert!(false)
+            action_seq_empty(0)
+        },
+    }
+}
+
+fn expect_item(_ sequence: ActionSeq<u256, 3>, _ index: usize) -> u256 {
+    match action_seq_get(sequence, index) {
+        Option::Some(value) => value,
+        Option::None => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn fail_at_length_two(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    if action_seq_len(value) >= 2 {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+struct FailAtLengthTwoProperty {}
+
+impl Copy for FailAtLengthTwoProperty {}
+
+impl PureU256ActionSeqProperty<3> for FailAtLengthTwoProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        fail_at_length_two(value)
+    }
+}
+
+struct PassSequenceProperty {}
+
+impl Copy for PassSequenceProperty {}
+
+impl PureU256ActionSeqProperty<3> for PassSequenceProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Pass
+    }
+}
+
+struct DiscardSequenceProperty {}
+
+impl Copy for DiscardSequenceProperty {}
+
+impl PureU256ActionSeqProperty<3> for DiscardSequenceProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::Discard
+    }
+}
+
+struct InfrastructureSequenceProperty {}
+
+impl Copy for InfrastructureSequenceProperty {}
+
+impl PureU256ActionSeqProperty<3> for InfrastructureSequenceProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+        PropertyVerdict::InfrastructureError(ErrorCode { kind: 999, detail: 7 })
+    }
+}
+
+struct ScalarPassProperty {}
+
+impl Copy for ScalarPassProperty {}
+
+impl PureU256Property for ScalarPassProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        PropertyVerdict::Pass
+    }
+}
+
+fn counted_pass_3(_ value: ActionSeq<u256, 3>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    PropertyVerdict::Pass
+}
+
+fn counted_pass_5(_ value: ActionSeq<u256, 5>) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    PropertyVerdict::Pass
+}
+
+fn traced_fail_at_length_two(_ value: ActionSeq<u256, 3>) -> PropertyVerdict
+uses (trace: mut LengthTrace)
+{
+    trace.lengths[trace.count] = action_seq_len(value) as u256
+    trace.count += 1
+    fail_at_length_two(value)
+}
+
+fn mixed_sequence_shrink(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    let len = action_seq_len(value)
+    if len == 0 {
+        return PropertyVerdict::Pass
+    }
+    if len == 1 {
+        let first = expect_item(value, 0)
+        if first == 3 {
+            return PropertyVerdict::Discard
+        }
+        if first == 1 {
+            return PropertyVerdict::Fail(FailureKey { kind: 1, detail: 8 })
+        }
+        return PropertyVerdict::Pass
+    }
+    if len == 2 {
+        let first = expect_item(value, 0)
+        let second = expect_item(value, 1)
+        if first == 1 && second == 2 {
+            return PropertyVerdict::Fail(FailureKey { kind: 1, detail: 9 })
+        }
+        if first == 2 && second == 3 {
+            return PropertyVerdict::Fail(FailureKey { kind: 2, detail: 9 })
+        }
+        if first == 1 && second == 3 {
+            return PropertyVerdict::Discard
+        }
+    }
+    PropertyVerdict::Pass
+}
+
+fn shrink_infrastructure(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    PropertyVerdict::InfrastructureError(ErrorCode { kind: 777, detail: 1 })
+}
+
+fn always_fail_sequence_3(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+}
+
+fn fail_at_most_one(_ value: ActionSeq<u256, 3>) -> PropertyVerdict {
+    if action_seq_len(value) <= 1 {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+struct AlwaysFailZeroCapacityProperty {}
+
+impl Copy for AlwaysFailZeroCapacityProperty {}
+
+impl PureU256ActionSeqProperty<0> for AlwaysFailZeroCapacityProperty {
+    fn evaluate(self, _ value: ActionSeq<u256, 0>) -> PropertyVerdict {
+        PropertyVerdict::Fail(FailureKey { kind: 8, detail: 0 })
+    }
+}
+
+#[test]
+fn sequence_run_fingerprint_matches_the_independent_python_oracle() {
+    let strategy: U256ActionSeqStrategy<3> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: u256::max(), origin: 0 },
+        max_actions: 3,
+    }
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    assert!(
+        run_fingerprint(generation, sequence_config())
+            == 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b,
+    )
+}
+
+#[test]
+fn pure_sequence_runner_restarts_structural_shrinking_and_preserves_accounting() {
+    let strategy = sequence_strategy()
+    let outcome = check_u256_action_seq_pure(
+        strategy,
+        7,
+        sequence_config(),
+        FailAtLengthTwoProperty {},
+    )
+    match outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(failure.kind == 5)
+            assert!(failure.detail == 9)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.discards == 0)
+            assert!(shrink.evaluations == 5)
+            assert!(shrink.accepted == 1)
+            assert!(shrink.rejected_pass == 4)
+            assert!(shrink.rejected_discard == 0)
+            assert!(shrink.rejected_failure_key == 0)
+            assert!(
+                stats.property_evaluations == stats.attempts + shrink.evaluations,
+            )
+            assert!(stats.state_evaluations == 0)
+            assert!(stats.fixture_evaluations == 0)
+            assert!(stats.contract_deployments == 0)
+            assert!(stats.actions_executed == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let original = expect_sequence(action_seq_try_new([0, 0, 0], 3))
+    var trace = LengthTrace { count: 0, lengths: [99; 16] }
+    let traced = with (LengthTrace = mut trace) {
+        shrink_u256_action_seq_prevalidated(
+            strategy,
+            original,
+            FailureKey { kind: 5, detail: 9 },
+            100,
+            traced_fail_at_length_two,
+        )
+    }
+    match traced {
+        U256ActionSeqShrinkResult::Complete { minimal, stats: _, status: _ } => {
+            assert!(action_seq_len(minimal) == 2)
+        },
+        U256ActionSeqShrinkResult::InfrastructureError { error: _, stats: _ } => assert!(false),
+    }
+    assert!(trace.count == 5)
+    assert!(trace.lengths[0] == 0)
+    assert!(trace.lengths[1] == 1)
+    assert!(trace.lengths[2] == 2)
+    assert!(trace.lengths[3] == 0)
+    assert!(trace.lengths[4] == 1)
+}
+
+#[test]
+fn sequence_shrink_classifies_pass_discard_and_both_other_key_shapes() {
+    let strategy = sequence_strategy()
+    let source = expect_sequence(action_seq_try_new([1, 2, 3], 3))
+    let result = shrink_u256_action_seq_prevalidated(
+        strategy,
+        source,
+        FailureKey { kind: 1, detail: 9 },
+        100,
+        mixed_sequence_shrink,
+    )
+    match result {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 2)
+            assert!(expect_item(minimal, 0) == 1)
+            assert!(expect_item(minimal, 1) == 2)
+            assert!(stats.evaluations == 12)
+            assert!(stats.accepted == 1)
+            assert!(stats.rejected_pass == 6)
+            assert!(stats.rejected_discard == 2)
+            assert!(stats.rejected_failure_key == 3)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        U256ActionSeqShrinkResult::InfrastructureError { error: _, stats: _ } => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_shrink_budget_distinguishes_pending_exact_and_empty() {
+    let strategy = sequence_strategy()
+    let failure = FailureKey { kind: 5, detail: 9 }
+    let source = expect_sequence(action_seq_try_new([0, 0, 0], 3))
+
+    let zero = shrink_u256_action_seq_prevalidated(strategy, source, failure, 0, fail_at_length_two)
+    match zero {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 3)
+            assert!(stats.evaluations == 0)
+            match status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let accepted_on_last_evaluation = shrink_u256_action_seq_prevalidated(
+        strategy,
+        source,
+        failure,
+        3,
+        fail_at_length_two,
+    )
+    match accepted_on_last_evaluation {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 2)
+            assert!(stats.evaluations == 3)
+            assert!(stats.accepted == 1)
+            match status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let one_less = shrink_u256_action_seq_prevalidated(
+        strategy,
+        source,
+        failure,
+        4,
+        fail_at_length_two,
+    )
+    match one_less {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 2)
+            assert!(stats.evaluations == 4)
+            match status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let exact = shrink_u256_action_seq_prevalidated(
+        strategy,
+        source,
+        failure,
+        5,
+        fail_at_length_two,
+    )
+    match exact {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 2)
+            assert!(stats.evaluations == 5)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let empty = expect_sequence(action_seq_try_new([0, 0, 0], 0))
+    let empty_result = shrink_u256_action_seq_prevalidated(
+        strategy,
+        empty,
+        failure,
+        0,
+        always_fail_sequence_3,
+    )
+    match empty_result {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 0)
+            assert!(stats.evaluations == 0)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let length_one = expect_sequence(action_seq_try_new([0, 0, 0], 1))
+    let accepted_into_empty = shrink_u256_action_seq_prevalidated(
+        strategy,
+        length_one,
+        failure,
+        1,
+        fail_at_most_one,
+    )
+    match accepted_into_empty {
+        U256ActionSeqShrinkResult::Complete { minimal, stats, status } => {
+            assert!(action_seq_len(minimal) == 0)
+            assert!(stats.evaluations == 1)
+            assert!(stats.accepted == 1)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn zero_capacity_runner_falsifies_and_completes_without_shrink_evaluations() {
+    let strategy: U256ActionSeqStrategy<0> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 0, origin: 0 },
+        max_actions: 0,
+    }
+    var config = sequence_config()
+    config.target_valid_cases = 1
+    config.max_shrink_evaluations = 0
+    let outcome = check_u256_action_seq_pure(strategy, 7, config, AlwaysFailZeroCapacityProperty {})
+    match outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 0)
+            assert!(action_seq_len(minimal) == 0)
+            assert!(failure.kind == 8)
+            assert!(stats.attempts == 1)
+            assert!(stats.property_evaluations == 1)
+            assert!(shrink.evaluations == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_runner_handles_pass_discard_zero_target_and_infrastructure() {
+    let strategy = sequence_strategy()
+
+    let passed = check_u256_action_seq_pure(strategy, 7, sequence_config(), PassSequenceProperty {})
+    match passed {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 3)
+            assert!(stats.property_evaluations == 3)
+        },
+        _ => assert!(false),
+    }
+
+    var discard_config = sequence_config()
+    discard_config.max_discards = 0
+    let exhausted = check_u256_action_seq_pure(
+        strategy,
+        7,
+        discard_config,
+        DiscardSequenceProperty {},
+    )
+    match exhausted {
+        RunOutcome::Exhausted { reason, stats } => {
+            match reason {
+                ExhaustionReason::MaxDiscards => {},
+            }
+            assert!(stats.attempts == 1)
+            assert!(stats.discards == 1)
+            assert!(stats.property_evaluations == 1)
+        },
+        _ => assert!(false),
+    }
+
+    var zero_config = sequence_config()
+    zero_config.target_valid_cases = 0
+    let zero = check_u256_action_seq_pure(
+        strategy,
+        7,
+        zero_config,
+        InfrastructureSequenceProperty {},
+    )
+    match zero {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 0)
+            assert!(stats.property_evaluations == 0)
+        },
+        _ => assert!(false),
+    }
+
+    let infrastructure = check_u256_action_seq_pure(
+        strategy,
+        7,
+        sequence_config(),
+        InfrastructureSequenceProperty {},
+    )
+    match infrastructure {
+        RunOutcome::InfrastructureError { error, stats } => {
+            assert!(error.kind == 999)
+            assert!(stats.attempts == 1)
+            assert!(stats.property_evaluations == 1)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_config_and_strategy_errors_happen_before_property_evaluation() {
+    let strategy = sequence_strategy()
+    var wrong_codec = sequence_config()
+    wrong_codec.codec_fingerprint = u256_codec_fingerprint()
+    var counter = EvalCounter { count: 0 }
+
+    let wrong = with (EvalCounter = mut counter) {
+        check_u256_action_seq_with_callable(strategy, 7, wrong_codec, counted_pass_3)
+    }
+    match wrong {
+        RunOutcome::ConfigurationError { error: _, stats } => {
+            assert!(stats.attempts == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 0)
+
+    let invalid_action = U256ActionSeqStrategy {
+        action: U256Range { lo: 3, hi: 2, origin: 3 },
+        max_actions: 3,
+    }
+    let invalid = with (EvalCounter = mut counter) {
+        check_u256_action_seq_with_callable(invalid_action, 7, sequence_config(), counted_pass_3)
+    }
+    match invalid {
+        RunOutcome::ConfigurationError { error: _, stats } => {
+            assert!(stats.attempts == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 0)
+
+    let oversized: U256ActionSeqStrategy<5> = U256ActionSeqStrategy {
+        action: U256Range { lo: 0, hi: 3, origin: 0 },
+        max_actions: 5,
+    }
+    let oversized_result = with (EvalCounter = mut counter) {
+        check_u256_action_seq_with_callable(oversized, 7, sequence_config(), counted_pass_5)
+    }
+    match oversized_result {
+        RunOutcome::ConfigurationError { error: _, stats } => {
+            assert!(stats.attempts == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 0)
+
+    var scalar_wrong_codec = sequence_config()
+    scalar_wrong_codec.target_valid_cases = 1
+    let scalar = check_u256_pure(
+        U256Range { lo: 0, hi: 3, origin: 0 },
+        7,
+        scalar_wrong_codec,
+        ScalarPassProperty {},
+    )
+    match scalar {
+        RunOutcome::ConfigurationError { error: _, stats } => {
+            assert!(stats.attempts == 0)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn sequence_shrink_infrastructure_aborts_without_a_rejection_category() {
+    let strategy = sequence_strategy()
+    let source = expect_sequence(action_seq_try_new([1, 0, 0], 1))
+    let result = shrink_u256_action_seq_prevalidated(
+        strategy,
+        source,
+        FailureKey { kind: 1, detail: 9 },
+        10,
+        shrink_infrastructure,
+    )
+    match result {
+        U256ActionSeqShrinkResult::InfrastructureError { error, stats } => {
+            assert!(error.kind == 777)
+            assert!(stats.evaluations == 1)
+            assert!(stats.accepted == 0)
+            assert!(stats.rejected_pass == 0)
+            assert!(stats.rejected_discard == 0)
+            assert!(stats.rejected_failure_key == 0)
+        },
+        _ => assert!(false),
+    }
+}

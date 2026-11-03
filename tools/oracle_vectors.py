@@ -235,6 +235,23 @@ action_seq_random_value_preimage = (
 )
 action_seq_random_value_hash = keccak256(action_seq_random_value_preimage)
 
+action_seq_run_preimage, action_seq_run_hash = hash_word_fields(
+    "FECHECK/RUN/V1",
+    [
+        as_int(action_seq_random_generation_hash),
+        31,
+        41,
+        3,
+        10,
+        100,
+        0,
+        0,
+        1,
+        1,
+        as_int(action_seq_codec_hash),
+    ],
+)
+
 VECTORS = {
     "action_seq_strategy_max0": (
         action_seq_max0_preimage,
@@ -285,6 +302,11 @@ VECTORS = {
         action_seq_random_value_preimage,
         action_seq_random_value_hash,
         "7a311e9c48901abebd3c7f5e337034c52dbbfd02be8266cb61a827dfe080ee4a",
+    ),
+    "action_seq_run": (
+        action_seq_run_preimage,
+        action_seq_run_hash,
+        "64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b",
     ),
     "action_seq_79_descriptor": (
         seq79_preimage,
