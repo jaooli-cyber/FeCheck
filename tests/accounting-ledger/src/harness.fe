@@ -1,0 +1,605 @@
+use core::ptr::MemBuffer
+use fecheck::{
+    ErrorCode,
+    FailureKey,
+    FixtureRole,
+    PropertyVerdict,
+    RunConfig,
+    StatefulActionSeqRequest,
+    StatefulActionSeqRunReport,
+    StatefulEvaluationContext,
+    StatefulEvaluationReceipt,
+    StatefulFixturePreflight,
+    StatefulFixtureRequest,
+    StatefulRunRegistry,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_get,
+    action_seq_len,
+    action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_stateful_experimental,
+    stateful_fixture_salt,
+}
+use std::evm::{Address, Call, Create, Evm, predict_create2}
+
+use super::action::{
+    LEDGER_ACTION_MAX_V1,
+    LEDGER_ACTION_MIN_V1,
+    LEDGER_ACTION_ORIGIN_V1,
+    LedgerAction,
+    LedgerActor,
+    decode_ledger_action_v1,
+}
+use super::contracts::{
+    AccountingLedgerBuggy,
+    AccountingLedgerFixed,
+    AccountingLedgerMsg,
+    LedgerActorMsg,
+    LedgerActorProxy,
+}
+use super::model::{
+    LedgerModel,
+    LedgerPreview,
+    empty_ledger_model,
+    ledger_model_equal,
+    preview_ledger_action,
+}
+
+pub const LEDGER_SUITE_ID_V1: u256 = 0x4c4544470001
+pub const LEDGER_BUGGY_NAMESPACE_V1: u256 = 1
+pub const LEDGER_FIXED_NAMESPACE_V1: u256 = 2
+pub const LEDGER_MASTER_SEED_V1: u256 = 1608
+
+pub const KIND_LEDGER_INVARIANT: u256 = 0x4c45444701
+pub const DETAIL_ACCOUNTING_CONSERVATION: u256 = 1
+pub const KIND_LEDGER_MODEL: u256 = 0x4c45444702
+pub const DETAIL_STATE_MISMATCH: u256 = 1
+pub const KIND_LEDGER_CALL: u256 = 0x4c45444703
+pub const DETAIL_UNEXPECTED_DEPOSIT_REVERT: u256 = 1
+pub const DETAIL_UNEXPECTED_TRANSFER_REVERT: u256 = 2
+
+const ERROR_LEDGER_PREDICTED_ADDRESS_OCCUPIED: u256 = 0x4c45444710
+const ERROR_LEDGER_FIXTURE_IDENTITY: u256 = 0x4c45444711
+const ERROR_LEDGER_BINDING_CALL: u256 = 0x4c45444712
+const ERROR_LEDGER_BINDING_ABI: u256 = 0x4c45444713
+const ERROR_LEDGER_BINDING_MISMATCH: u256 = 0x4c45444714
+const ERROR_LEDGER_SNAPSHOT_CALL: u256 = 0x4c45444715
+const ERROR_LEDGER_SNAPSHOT_ABI: u256 = 0x4c45444716
+const ERROR_LEDGER_INITIAL_STATE: u256 = 0x4c45444717
+const ERROR_LEDGER_ACTION_ABI: u256 = 0x4c45444718
+const ERROR_LEDGER_ACTION_SEQUENCE: u256 = 0x4c45444719
+
+const OBS_BALANCE_A: u256 = 1
+const OBS_BALANCE_B: u256 = 2
+const OBS_TOTAL_SHARES: u256 = 3
+const BINDING_ACTOR_A: u256 = 1
+const BINDING_ACTOR_B: u256 = 2
+
+pub enum LedgerTargetVariant {
+    Buggy,
+    Fixed,
+}
+
+impl Copy for LedgerTargetVariant {}
+
+pub struct LedgerSalts { pub target: u256, pub actor_a: u256, pub actor_b: u256 }
+
+impl Copy for LedgerSalts {}
+
+pub struct LedgerFixture { pub target: Address, pub actor_a: Address, pub actor_b: Address }
+
+impl Copy for LedgerFixture {}
+
+pub struct LedgerSnapshot { pub balance_a: u256, pub balance_b: u256, pub total_shares: u256 }
+
+impl Copy for LedgerSnapshot {}
+
+pub enum LedgerSnapshotResult {
+    Value(LedgerSnapshot),
+    InfrastructureError(ErrorCode),
+}
+
+impl Copy for LedgerSnapshotResult {}
+
+enum LedgerWordResult {
+    Value(u256),
+    InfrastructureError(ErrorCode),
+}
+
+impl Copy for LedgerWordResult {}
+
+enum LedgerCallResult {
+    Success,
+    LogicalFailure(FailureKey),
+    InfrastructureError(ErrorCode),
+}
+
+impl Copy for LedgerCallResult {}
+
+pub fn ledger_strategy_v1() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy {
+        action: U256Range {
+            lo: LEDGER_ACTION_MIN_V1,
+            hi: LEDGER_ACTION_MAX_V1,
+            origin: LEDGER_ACTION_ORIGIN_V1,
+        },
+        max_actions: 3,
+    }
+}
+
+pub fn ledger_run_config_v1(_ namespace: u256) -> RunConfig {
+    RunConfig {
+        suite_id: LEDGER_SUITE_ID_V1,
+        namespace,
+        target_valid_cases: 4,
+        max_discards: 0,
+        max_shrink_evaluations: 18,
+        max_state_evaluations: 22,
+        max_deployments: 66,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+pub fn ledger_salts(_ context: StatefulEvaluationContext) -> LedgerSalts {
+    LedgerSalts {
+        target: stateful_fixture_salt(context, FixtureRole::Target),
+        actor_a: stateful_fixture_salt(context, FixtureRole::ActorA),
+        actor_b: stateful_fixture_salt(context, FixtureRole::ActorB),
+    }
+}
+
+fn target_address(_ variant: LedgerTargetVariant, _ deployer: Address, _ salt: u256) -> Address {
+    match variant {
+        LedgerTargetVariant::Buggy => {
+            predict_create2<AccountingLedgerBuggy>(deployer, args: (), salt)
+        },
+        LedgerTargetVariant::Fixed => {
+            predict_create2<AccountingLedgerFixed>(deployer, args: (), salt)
+        },
+    }
+}
+
+pub fn predicted_ledger_fixture(
+    _ context: StatefulEvaluationContext,
+    _ deployer: Address,
+    _ variant: LedgerTargetVariant,
+) -> LedgerFixture {
+    let salts = ledger_salts(context)
+    let target = target_address(variant, deployer, salts.target)
+    LedgerFixture {
+        target,
+        actor_a: predict_create2<LedgerActorProxy>(deployer, args: (target,), salt: salts.actor_a),
+        actor_b: predict_create2<LedgerActorProxy>(deployer, args: (target,), salt: salts.actor_b),
+    }
+}
+
+fn fixture_identity_is_distinct(_ salts: LedgerSalts, _ fixture: LedgerFixture) -> bool {
+    salts.target != salts.actor_a
+        && salts.target != salts.actor_b
+        && salts.actor_a != salts.actor_b
+        && fixture.target != fixture.actor_a
+        && fixture.target != fixture.actor_b
+        && fixture.actor_a != fixture.actor_b
+}
+
+fn occupied_error(_ address: Address) -> StatefulFixturePreflight {
+    StatefulFixturePreflight::InfrastructureError {
+        error: ErrorCode { kind: ERROR_LEDGER_PREDICTED_ADDRESS_OCCUPIED, detail: address.word() },
+    }
+}
+
+pub struct LedgerPreflight { pub variant: LedgerTargetVariant }
+
+impl Copy for LedgerPreflight {}
+
+impl Fn(StatefulFixtureRequest) -> _ for LedgerPreflight {
+    uses E = (evm: mut Evm)
+    type Out = StatefulFixturePreflight
+
+    fn call(self, _ request: StatefulFixtureRequest) -> StatefulFixturePreflight
+    uses E
+    {
+        let salts = ledger_salts(request.context)
+        let fixture = predicted_ledger_fixture(request.context, evm.address(), self.variant)
+        if !fixture_identity_is_distinct(salts, fixture) {
+            return StatefulFixturePreflight::InfrastructureError {
+                error: ErrorCode { kind: ERROR_LEDGER_FIXTURE_IDENTITY, detail: 0 },
+            }
+        }
+        if evm.extcodesize(fixture.target) != 0 {
+            return occupied_error(fixture.target)
+        }
+        if evm.extcodesize(fixture.actor_a) != 0 {
+            return occupied_error(fixture.actor_a)
+        }
+        if evm.extcodesize(fixture.actor_b) != 0 {
+            return occupied_error(fixture.actor_b)
+        }
+        StatefulFixturePreflight::Ready
+    }
+}
+
+fn deploy_target(_ variant: LedgerTargetVariant, _ salt: u256) -> Address
+uses (evm: mut Evm)
+{
+    match variant {
+        LedgerTargetVariant::Buggy => {
+            evm.create2<AccountingLedgerBuggy>(value: Wei::zero(), args: (), salt)
+        },
+        LedgerTargetVariant::Fixed => {
+            evm.create2<AccountingLedgerFixed>(value: Wei::zero(), args: (), salt)
+        },
+    }
+}
+
+pub fn deploy_ledger_fixture(
+    _ context: StatefulEvaluationContext,
+    _ variant: LedgerTargetVariant,
+) -> LedgerFixture
+uses (evm: mut Evm)
+{
+    let salts = ledger_salts(context)
+    let predicted = predicted_ledger_fixture(context, evm.address(), variant)
+    assert!(fixture_identity_is_distinct(salts, predicted))
+
+    let target = deploy_target(variant, salts.target)
+    let actor_a = evm
+        .create2<LedgerActorProxy>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_a,
+        )
+    let actor_b = evm
+        .create2<LedgerActorProxy>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_b,
+        )
+
+    assert!(target == predicted.target)
+    assert!(actor_a == predicted.actor_a)
+    assert!(actor_b == predicted.actor_b)
+    assert!(evm.extcodesize(target) != 0)
+    assert!(evm.extcodesize(actor_a) != 0)
+    assert!(evm.extcodesize(actor_b) != 0)
+    LedgerFixture { target, actor_a, actor_b }
+}
+
+fn read_binding(_ actor: Address, _ detail: u256) -> LedgerWordResult
+uses (evm: mut Evm)
+{
+    var ret = MemBuffer::with_capacity(32)
+    let outcome = evm
+        .try_static_into(
+            addr: actor,
+            gas: 100000,
+            message: LedgerActorMsg::BoundTarget {},
+            ret: mut ret,
+        )
+    if !outcome.success() {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_BINDING_CALL, detail },
+        )
+    }
+    if outcome.returndata_len() != 32 {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_BINDING_ABI, detail },
+        )
+    }
+    LedgerWordResult::Value(ret.span().word_at(0))
+}
+
+fn read_balance(_ target: Address, _ owner: Address, _ detail: u256) -> LedgerWordResult
+uses (evm: mut Evm)
+{
+    var ret = MemBuffer::with_capacity(32)
+    let outcome = evm
+        .try_static_into(
+            addr: target,
+            gas: 100000,
+            message: AccountingLedgerMsg::Balance { owner },
+            ret: mut ret,
+        )
+    if !outcome.success() {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_SNAPSHOT_CALL, detail },
+        )
+    }
+    if outcome.returndata_len() != 32 {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_SNAPSHOT_ABI, detail },
+        )
+    }
+    LedgerWordResult::Value(ret.span().word_at(0))
+}
+
+fn read_total(_ target: Address) -> LedgerWordResult uses (evm: mut Evm) {
+    var ret = MemBuffer::with_capacity(32)
+    let outcome = evm
+        .try_static_into(
+            addr: target,
+            gas: 100000,
+            message: AccountingLedgerMsg::TotalShares {},
+            ret: mut ret,
+        )
+    if !outcome.success() {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_SNAPSHOT_CALL, detail: OBS_TOTAL_SHARES },
+        )
+    }
+    if outcome.returndata_len() != 32 {
+        return LedgerWordResult::InfrastructureError(
+            ErrorCode { kind: ERROR_LEDGER_SNAPSHOT_ABI, detail: OBS_TOTAL_SHARES },
+        )
+    }
+    LedgerWordResult::Value(ret.span().word_at(0))
+}
+
+pub fn observe_ledger_snapshot(_ fixture: LedgerFixture) -> LedgerSnapshotResult
+uses (evm: mut Evm)
+{
+    let balance_a = match read_balance(fixture.target, fixture.actor_a, OBS_BALANCE_A) {
+        LedgerWordResult::Value(value) => value,
+        LedgerWordResult::InfrastructureError(error) => {
+            return LedgerSnapshotResult::InfrastructureError(error)
+        },
+    }
+    let balance_b = match read_balance(fixture.target, fixture.actor_b, OBS_BALANCE_B) {
+        LedgerWordResult::Value(value) => value,
+        LedgerWordResult::InfrastructureError(error) => {
+            return LedgerSnapshotResult::InfrastructureError(error)
+        },
+    }
+    let total_shares = match read_total(fixture.target) {
+        LedgerWordResult::Value(value) => value,
+        LedgerWordResult::InfrastructureError(error) => {
+            return LedgerSnapshotResult::InfrastructureError(error)
+        },
+    }
+    LedgerSnapshotResult::Value(LedgerSnapshot { balance_a, balance_b, total_shares })
+}
+
+fn actor_address(_ fixture: LedgerFixture, _ actor: LedgerActor) -> Address {
+    match actor {
+        LedgerActor::A => fixture.actor_a,
+        LedgerActor::B => fixture.actor_b,
+    }
+}
+
+fn execute_action(_ fixture: LedgerFixture, _ action: LedgerAction) -> LedgerCallResult
+uses (evm: mut Evm)
+{
+    match action {
+        LedgerAction::Deposit { actor, amount } => {
+            var ret = MemBuffer::with_capacity(0)
+            let outcome = evm
+                .try_call_into(
+                    addr: actor_address(fixture, actor),
+                    gas: 500000,
+                    value: Wei::zero(),
+                    message: LedgerActorMsg::Deposit { amount },
+                    ret: mut ret,
+                )
+            if !outcome.success() {
+                return LedgerCallResult::LogicalFailure(
+                    FailureKey { kind: KIND_LEDGER_CALL, detail: DETAIL_UNEXPECTED_DEPOSIT_REVERT },
+                )
+            }
+            if outcome.returndata_len() != 0 {
+                return LedgerCallResult::InfrastructureError(
+                    ErrorCode { kind: ERROR_LEDGER_ACTION_ABI, detail: 1 },
+                )
+            }
+        },
+        LedgerAction::Transfer { from, to, amount } => {
+            var ret = MemBuffer::with_capacity(0)
+            let outcome = evm
+                .try_call_into(
+                    addr: actor_address(fixture, from),
+                    gas: 500000,
+                    value: Wei::zero(),
+                    message: LedgerActorMsg::Transfer { to: actor_address(fixture, to), amount },
+                    ret: mut ret,
+                )
+            if !outcome.success() {
+                return LedgerCallResult::LogicalFailure(
+                    FailureKey {
+                        kind: KIND_LEDGER_CALL,
+                        detail: DETAIL_UNEXPECTED_TRANSFER_REVERT,
+                    },
+                )
+            }
+            if outcome.returndata_len() != 0 {
+                return LedgerCallResult::InfrastructureError(
+                    ErrorCode { kind: ERROR_LEDGER_ACTION_ABI, detail: 2 },
+                )
+            }
+        },
+    }
+    LedgerCallResult::Success
+}
+
+fn conservation_failure() -> PropertyVerdict {
+    PropertyVerdict::Fail(
+        FailureKey { kind: KIND_LEDGER_INVARIANT, detail: DETAIL_ACCOUNTING_CONSERVATION },
+    )
+}
+
+/// Conservation is deliberately classified before field-by-field mismatch.
+pub fn classify_ledger_snapshot(
+    _ expected: LedgerModel,
+    _ observed: LedgerSnapshot,
+) -> PropertyVerdict {
+    if observed.balance_a > u256::max() - observed.balance_b {
+        return conservation_failure()
+    }
+    if observed.balance_a + observed.balance_b != observed.total_shares {
+        return conservation_failure()
+    }
+    let observed_model = LedgerModel {
+        balance_a: observed.balance_a,
+        balance_b: observed.balance_b,
+        total_shares: observed.total_shares,
+    }
+    if !ledger_model_equal(expected, observed_model) {
+        return PropertyVerdict::Fail(
+            FailureKey { kind: KIND_LEDGER_MODEL, detail: DETAIL_STATE_MISMATCH },
+        )
+    }
+    PropertyVerdict::Pass
+}
+
+fn receipt(_ verdict: PropertyVerdict, _ actions_executed: u256) -> StatefulEvaluationReceipt {
+    StatefulEvaluationReceipt { verdict, actions_executed }
+}
+
+fn infrastructure_receipt(
+    _ error: ErrorCode,
+    _ actions_executed: u256,
+) -> StatefulEvaluationReceipt {
+    receipt(
+        PropertyVerdict::InfrastructureError(error),
+        actions_executed,
+    )
+}
+
+fn verify_binding(_ actor: Address, _ target: Address, _ detail: u256) -> Option<ErrorCode>
+uses (evm: mut Evm)
+{
+    match read_binding(actor, detail) {
+        LedgerWordResult::InfrastructureError(error) => Option::Some(error),
+        LedgerWordResult::Value(bound) => {
+            if bound != target.word() {
+                Option::Some(ErrorCode { kind: ERROR_LEDGER_BINDING_MISMATCH, detail })
+            } else {
+                Option::None
+            }
+        },
+    }
+}
+
+pub struct LedgerEvaluator { pub variant: LedgerTargetVariant }
+
+impl Copy for LedgerEvaluator {}
+
+impl Fn(StatefulActionSeqRequest<3>) -> _ for LedgerEvaluator {
+    uses E = (evm: mut Evm)
+    type Out = StatefulEvaluationReceipt
+
+    fn call(self, _ request: StatefulActionSeqRequest<3>) -> StatefulEvaluationReceipt
+    uses E
+    {
+        let fixture = deploy_ledger_fixture(request.context, self.variant)
+        var actions_executed: u256 = 0
+
+        match verify_binding(fixture.actor_a, fixture.target, BINDING_ACTOR_A) {
+            Option::Some(error) => {
+                return infrastructure_receipt(error, actions_executed)
+            },
+            Option::None => {},
+        }
+        match verify_binding(fixture.actor_b, fixture.target, BINDING_ACTOR_B) {
+            Option::Some(error) => {
+                return infrastructure_receipt(error, actions_executed)
+            },
+            Option::None => {},
+        }
+
+        let initial = match observe_ledger_snapshot(fixture) {
+            LedgerSnapshotResult::Value(snapshot) => snapshot,
+            LedgerSnapshotResult::InfrastructureError(error) => {
+                return infrastructure_receipt(error, actions_executed)
+            },
+        }
+        if initial.balance_a != 0 || initial.balance_b != 0 || initial.total_shares != 0 {
+            return infrastructure_receipt(
+                ErrorCode { kind: ERROR_LEDGER_INITIAL_STATE, detail: 0 },
+                actions_executed,
+            )
+        }
+
+        var model = empty_ledger_model()
+        var observed = initial
+        var index: usize = 0
+        let logical_len = action_seq_len(request.value)
+        while index < logical_len {
+            match classify_ledger_snapshot(model, observed) {
+                PropertyVerdict::Pass => {},
+                verdict => {
+                    return receipt(verdict, actions_executed)
+                },
+            }
+
+            let word = match action_seq_get(request.value, index) {
+                Option::Some(value) => value,
+                Option::None => {
+                    return infrastructure_receipt(
+                        ErrorCode { kind: ERROR_LEDGER_ACTION_SEQUENCE, detail: index as u256 },
+                        actions_executed,
+                    )
+                },
+            }
+            let action = match decode_ledger_action_v1(word) {
+                Option::Some(action) => action,
+                Option::None => {
+                    return receipt(PropertyVerdict::Discard, actions_executed)
+                },
+            }
+            let predicted_next = match preview_ledger_action(model, action) {
+                LedgerPreview::Ready { predicted_next } => predicted_next,
+                LedgerPreview::Discard => {
+                    return receipt(PropertyVerdict::Discard, actions_executed)
+                },
+            }
+
+            actions_executed += 1
+            match execute_action(fixture, action) {
+                LedgerCallResult::Success => {},
+                LedgerCallResult::LogicalFailure(failure) => {
+                    return receipt(PropertyVerdict::Fail(failure), actions_executed)
+                },
+                LedgerCallResult::InfrastructureError(error) => {
+                    return infrastructure_receipt(error, actions_executed)
+                },
+            }
+
+            let post = match observe_ledger_snapshot(fixture) {
+                LedgerSnapshotResult::Value(snapshot) => snapshot,
+                LedgerSnapshotResult::InfrastructureError(error) => {
+                    return infrastructure_receipt(error, actions_executed)
+                },
+            }
+            match classify_ledger_snapshot(predicted_next, post) {
+                PropertyVerdict::Pass => {
+                    model = predicted_next
+                    observed = post
+                },
+                verdict => {
+                    return receipt(verdict, actions_executed)
+                },
+            }
+            index += 1
+        }
+
+        receipt(PropertyVerdict::Pass, actions_executed)
+    }
+}
+
+pub fn run_accounting_ledger(
+    _ variant: LedgerTargetVariant,
+    _ namespace: u256,
+    _ registry: StatefulRunRegistry,
+) -> StatefulActionSeqRunReport<3>
+uses (evm: mut Evm)
+{
+    check_u256_action_seq_stateful_experimental(
+        ledger_strategy_v1(),
+        LEDGER_MASTER_SEED_V1,
+        ledger_run_config_v1(namespace),
+        registry,
+        LedgerPreflight { variant },
+        LedgerEvaluator { variant },
+    )
+}

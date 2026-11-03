@@ -1,0 +1,342 @@
+pub use action::*
+pub use contracts::*
+pub use harness::*
+pub use model::*
+
+use fecheck::{
+    ActionSeq,
+    GenerationResult,
+    PropertyVerdict,
+    RunOutcome,
+    ShrinkStatus,
+    StatefulActionSeqRequest,
+    StatefulEvaluationContext,
+    action_seq_empty,
+    action_seq_get,
+    action_seq_len,
+    action_seq_try_new,
+    generate_u256_action_seq_attempt,
+    generation_fingerprint,
+    stateful_run_registry_contains,
+    stateful_run_registry_empty,
+    stateful_run_registry_len,
+    u256_action_seq_fingerprint,
+    u256_strategy_fingerprint,
+}
+use std::evm::Evm
+
+const LEDGER_SCALAR_FINGERPRINT_V1: u256 = 0xd2ea76fb4727d2d963519393fbd3da268fefd347649838588a14f0733cb38135
+const LEDGER_ACTION_SEQ_FINGERPRINT_V1: u256 = 0x6ae4aa2ef26a8849817c65b1076ba384ca37d5dc5411c5ea95e0e149669f2a43
+const LEDGER_GENERATION_FINGERPRINT_V1: u256 = 0xf725d808dea501290fa02d43b07786393c747a511c813d737ec264f40daed6f7
+
+fn expect_sequence(
+    _ sequence: ActionSeq<u256, 3>,
+    _ len: usize,
+    _ first: u256,
+    _ second: u256,
+    _ third: u256,
+) {
+    assert!(action_seq_len(sequence) == len)
+    if len > 0 {
+        assert!(action_seq_get(sequence, 0).unwrap() == first)
+    }
+    if len > 1 {
+        assert!(action_seq_get(sequence, 1).unwrap() == second)
+    }
+    if len > 2 {
+        assert!(action_seq_get(sequence, 2).unwrap() == third)
+    }
+}
+
+fn generated_attempt(_ attempt_index: u256) -> ActionSeq<u256, 3> {
+    let strategy = ledger_strategy_v1()
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    match generate_u256_action_seq_attempt(
+        strategy,
+        LEDGER_MASTER_SEED_V1,
+        generation,
+        attempt_index,
+    ) {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            action_seq_empty(LEDGER_ACTION_ORIGIN_V1)
+        },
+    }
+}
+
+fn explicit_sequence(_ words: [u256; 3], _ len: usize) -> ActionSeq<u256, 3> {
+    match action_seq_try_new(words, len) {
+        Result::Ok(value) => value,
+        Result::Err(_) => {
+            assert!(false)
+            action_seq_empty(LEDGER_ACTION_ORIGIN_V1)
+        },
+    }
+}
+
+fn direct_context(_ namespace: u256) -> StatefulEvaluationContext {
+    StatefulEvaluationContext {
+        run_fingerprint: 0x4c454447444952454354,
+        suite_id: LEDGER_SUITE_ID_V1,
+        run_namespace: namespace,
+        master_seed: LEDGER_MASTER_SEED_V1,
+        attempt_index: 0,
+        local_evaluation_index: 0,
+    }
+}
+
+fn expect_snapshot(_ result: LedgerSnapshotResult) -> LedgerSnapshot {
+    match result {
+        LedgerSnapshotResult::Value(snapshot) => snapshot,
+        LedgerSnapshotResult::InfrastructureError(_) => {
+            assert!(false)
+            LedgerSnapshot { balance_a: 0, balance_b: 0, total_shares: 0 }
+        },
+    }
+}
+
+#[test]
+fn packed_strategy_and_attempt_three_match_the_independent_golden_vector() {
+    let strategy = ledger_strategy_v1()
+    let scalar = u256_strategy_fingerprint(strategy.action)
+    let sequence = u256_action_seq_fingerprint(strategy)
+    let generation = generation_fingerprint(sequence)
+    assert!(scalar == LEDGER_SCALAR_FINGERPRINT_V1)
+    assert!(sequence == LEDGER_ACTION_SEQ_FINGERPRINT_V1)
+    assert!(generation == LEDGER_GENERATION_FINGERPRINT_V1)
+
+    expect_sequence(generated_attempt(0), 0, 0, 0, 0)
+    expect_sequence(generated_attempt(1), 1, 1, 0, 0)
+    expect_sequence(generated_attempt(2), 3, 1, 1, 1)
+    expect_sequence(generated_attempt(3), 3, 2, 17, 25)
+}
+
+#[test]
+fn conservation_precedes_model_mismatch() {
+    let expected = LedgerModel { balance_a: 1, balance_b: 0, total_shares: 1 }
+    match classify_ledger_snapshot(
+        expected,
+        LedgerSnapshot { balance_a: 2, balance_b: 0, total_shares: 1 },
+    ) {
+        PropertyVerdict::Fail(failure) => {
+            assert!(failure.kind == KIND_LEDGER_INVARIANT)
+            assert!(failure.detail == DETAIL_ACCOUNTING_CONSERVATION)
+        },
+        _ => assert!(false),
+    }
+    match classify_ledger_snapshot(
+        expected,
+        LedgerSnapshot { balance_a: 0, balance_b: 1, total_shares: 1 },
+    ) {
+        PropertyVerdict::Fail(failure) => {
+            assert!(failure.kind == KIND_LEDGER_MODEL)
+            assert!(failure.detail == DETAIL_STATE_MISMATCH)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn minimal_witness_breaks_buggy_and_passes_fixed() uses (evm: mut Evm) {
+    let witness = explicit_sequence([1, 17, 1], 2)
+
+    let buggy_context = direct_context(101)
+    let buggy_receipt = LedgerEvaluator { variant: LedgerTargetVariant::Buggy }(
+        StatefulActionSeqRequest { value: witness, context: buggy_context },
+    )
+    assert!(buggy_receipt.actions_executed == 2)
+    match buggy_receipt.verdict {
+        PropertyVerdict::Fail(failure) => {
+            assert!(failure.kind == KIND_LEDGER_INVARIANT)
+            assert!(failure.detail == DETAIL_ACCOUNTING_CONSERVATION)
+        },
+        _ => assert!(false),
+    }
+    let buggy_fixture = predicted_ledger_fixture(
+        buggy_context,
+        evm.address(),
+        LedgerTargetVariant::Buggy,
+    )
+    assert!(buggy_fixture.target != buggy_fixture.actor_a)
+    assert!(buggy_fixture.actor_a != buggy_fixture.actor_b)
+    let buggy_snapshot = expect_snapshot(observe_ledger_snapshot(buggy_fixture))
+    assert!(buggy_snapshot.balance_a == 2)
+    assert!(buggy_snapshot.balance_b == 0)
+    assert!(buggy_snapshot.total_shares == 1)
+
+    let fixed_context = direct_context(102)
+    let fixed_receipt = LedgerEvaluator { variant: LedgerTargetVariant::Fixed }(
+        StatefulActionSeqRequest { value: witness, context: fixed_context },
+    )
+    assert!(fixed_receipt.actions_executed == 2)
+    match fixed_receipt.verdict {
+        PropertyVerdict::Pass => {},
+        _ => assert!(false),
+    }
+    let fixed_fixture = predicted_ledger_fixture(
+        fixed_context,
+        evm.address(),
+        LedgerTargetVariant::Fixed,
+    )
+    let fixed_snapshot = expect_snapshot(observe_ledger_snapshot(fixed_fixture))
+    assert!(fixed_snapshot.balance_a == 1)
+    assert!(fixed_snapshot.balance_b == 0)
+    assert!(fixed_snapshot.total_shares == 1)
+}
+
+#[test]
+fn actor_b_exercises_the_symmetric_buggy_and_fixed_paths() uses (evm: mut Evm) {
+    let witness = explicit_sequence([5, 29, 1], 2)
+
+    let buggy_context = direct_context(105)
+    let buggy_receipt = LedgerEvaluator { variant: LedgerTargetVariant::Buggy }(
+        StatefulActionSeqRequest { value: witness, context: buggy_context },
+    )
+    assert!(buggy_receipt.actions_executed == 2)
+    match buggy_receipt.verdict {
+        PropertyVerdict::Fail(failure) => {
+            assert!(failure.kind == KIND_LEDGER_INVARIANT)
+            assert!(failure.detail == DETAIL_ACCOUNTING_CONSERVATION)
+        },
+        _ => assert!(false),
+    }
+    let buggy_fixture = predicted_ledger_fixture(
+        buggy_context,
+        evm.address(),
+        LedgerTargetVariant::Buggy,
+    )
+    let buggy_snapshot = expect_snapshot(observe_ledger_snapshot(buggy_fixture))
+    assert!(buggy_snapshot.balance_a == 0)
+    assert!(buggy_snapshot.balance_b == 2)
+    assert!(buggy_snapshot.total_shares == 1)
+
+    let fixed_context = direct_context(106)
+    let fixed_receipt = LedgerEvaluator { variant: LedgerTargetVariant::Fixed }(
+        StatefulActionSeqRequest { value: witness, context: fixed_context },
+    )
+    assert!(fixed_receipt.actions_executed == 2)
+    match fixed_receipt.verdict {
+        PropertyVerdict::Pass => {},
+        _ => assert!(false),
+    }
+    let fixed_fixture = predicted_ledger_fixture(
+        fixed_context,
+        evm.address(),
+        LedgerTargetVariant::Fixed,
+    )
+    let fixed_snapshot = expect_snapshot(observe_ledger_snapshot(fixed_fixture))
+    assert!(fixed_snapshot.balance_a == 0)
+    assert!(fixed_snapshot.balance_b == 1)
+    assert!(fixed_snapshot.total_shares == 1)
+}
+
+#[test]
+fn cross_actor_transfer_uses_both_proxies_and_preserves_total()
+uses (evm: mut Evm)
+{
+    let context = direct_context(103)
+    let receipt = LedgerEvaluator { variant: LedgerTargetVariant::Fixed }(
+        StatefulActionSeqRequest { value: explicit_sequence([2, 25, 1], 2), context },
+    )
+    assert!(receipt.actions_executed == 2)
+    match receipt.verdict {
+        PropertyVerdict::Pass => {},
+        _ => assert!(false),
+    }
+    let fixture = predicted_ledger_fixture(context, evm.address(), LedgerTargetVariant::Fixed)
+    let snapshot = expect_snapshot(observe_ledger_snapshot(fixture))
+    assert!(snapshot.balance_a == 1)
+    assert!(snapshot.balance_b == 1)
+    assert!(snapshot.total_shares == 2)
+}
+
+#[test]
+fn a_reserved_word_discards_only_after_the_fresh_fixture_exists()
+uses (evm: mut Evm)
+{
+    let context = direct_context(104)
+    let receipt = LedgerEvaluator { variant: LedgerTargetVariant::Buggy }(
+        StatefulActionSeqRequest { value: explicit_sequence([9, 1, 1], 1), context },
+    )
+    assert!(receipt.actions_executed == 0)
+    match receipt.verdict {
+        PropertyVerdict::Discard => {},
+        _ => assert!(false),
+    }
+    let fixture = predicted_ledger_fixture(context, evm.address(), LedgerTargetVariant::Buggy)
+    assert!(evm.extcodesize(fixture.target) != 0)
+    assert!(evm.extcodesize(fixture.actor_a) != 0)
+    assert!(evm.extcodesize(fixture.actor_b) != 0)
+    let snapshot = expect_snapshot(observe_ledger_snapshot(fixture))
+    assert!(snapshot.balance_a == 0)
+    assert!(snapshot.balance_b == 0)
+    assert!(snapshot.total_shares == 0)
+}
+
+#[test]
+fn buggy_runner_finds_and_locally_shrinks_the_golden_counterexample()
+uses (evm: mut Evm)
+{
+    let config = ledger_run_config_v1(LEDGER_BUGGY_NAMESPACE_V1)
+    let report = run_accounting_ledger(
+        LedgerTargetVariant::Buggy,
+        LEDGER_BUGGY_NAMESPACE_V1,
+        stateful_run_registry_empty(),
+    )
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(
+        stateful_run_registry_contains(report.registry, config.suite_id, config.namespace),
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            expect_sequence(original, 3, 2, 17, 25)
+            expect_sequence(minimal, 2, 1, 17, 0)
+            assert!(failure.kind == KIND_LEDGER_INVARIANT)
+            assert!(failure.detail == DETAIL_ACCOUNTING_CONSERVATION)
+            assert!(stats.attempts == 4)
+            assert!(stats.valid_cases == 3)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 22)
+            assert!(stats.fixture_evaluations == 22)
+            assert!(stats.contract_deployments == 66)
+            assert!(stats.actions_executed == 21)
+            assert!(shrink.evaluations == 18)
+            assert!(shrink.accepted == 2)
+            assert!(shrink.rejected_pass == 8)
+            assert!(shrink.rejected_discard == 8)
+            assert!(shrink.rejected_failure_key == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn fixed_runner_passes_the_same_seed_and_strategy() uses (evm: mut Evm) {
+    let config = ledger_run_config_v1(LEDGER_FIXED_NAMESPACE_V1)
+    let report = run_accounting_ledger(
+        LedgerTargetVariant::Fixed,
+        LEDGER_FIXED_NAMESPACE_V1,
+        stateful_run_registry_empty(),
+    )
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(
+        stateful_run_registry_contains(report.registry, config.suite_id, config.namespace),
+    )
+    match report.outcome {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 4)
+            assert!(stats.valid_cases == 4)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 4)
+            assert!(stats.fixture_evaluations == 4)
+            assert!(stats.contract_deployments == 12)
+            assert!(stats.actions_executed == 7)
+        },
+        _ => assert!(false),
+    }
+}

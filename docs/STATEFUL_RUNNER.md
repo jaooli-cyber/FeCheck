@@ -160,7 +160,10 @@ The current evidence does not prove any of the following:
   or fixture policy;
 - that a stateful failure can be replayed from a capsule;
 - that a new outer EVM is created for each evaluation;
-- that the final AccountingLedger demo is implemented.
+- that this scheduler golden by itself establishes AccountingLedger behavior.
+
+The separate [`ACCOUNTING_LEDGER.md`](ACCOUNTING_LEDGER.md) demonstration now
+supplies that concrete adapter evidence under the same non-certification limits.
 
 The golden establishes behavior for its concrete adapter on the pinned
 toolchain. Statefulness is isolated by fresh contracts and a fresh local model
