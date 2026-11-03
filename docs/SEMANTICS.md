@@ -57,6 +57,11 @@ With `max_discards = 0`, the first discard exhausts the run. With
 `target_valid_cases = 0`, a valid configuration passes without generation or
 property evaluation.
 
+The normative stateful counters in `RunStats` are `fixture_evaluations`,
+`contract_deployments`, and `actions_executed`. There is no duplicate state
+evaluation counter. `max_state_evaluations` limits `fixture_evaluations`.
+Pure runners and pure replay require all three counters to remain zero.
+
 ## Scalar shrinking
 
 The origin is tried first. Remaining candidates repeatedly move from the
@@ -149,14 +154,21 @@ For the scalar `u256` path, the five canonical domain preimage sizes are:
 - `FECHECK/ATTEMPT/V1`: 370 bytes;
 - `FECHECK/VALUE/V1`: 272 bytes.
 
+The fixture salt is
+`Keccak256(PREIMAGE("FECHECK/FIXTURE/V1", fields))`, with seven word fields in
+this exact order: run fingerprint, suite ID, run namespace, master seed,
+attempt index, local evaluation index, and role tag. Its preimage is 754 bytes.
+V1 role tags are Target = 1, ActorA = 2, and ActorB = 3.
+
 `tools/oracle_vectors.py` independently constructs every byte, prints each
-preimage, and verifies 31 Keccak goldens with PyCryptodome 3.23.0. They cover
+preimage, and verifies 32 Keccak goldens with PyCryptodome 3.23.0. They cover
 Bool strategy identities, the scalar seeded full-domain RNG branch, ActionSeq
 logical encoding and dynamic value encoding, zero/one/full edge configurations,
 the complete seed-plus-four-word random sequence chain, a sequence run
 fingerprint, and the non-edge sequence attempt at index four through its
-attempt seed, four RNG words, and dynamic value digest. Fe tests also mutate
-every scalar strategy and run field individually.
+attempt seed, four RNG words, and dynamic value digest. The fixture vector
+covers its exact 754-byte preimage. Fe tests also mutate every scalar strategy
+and run field individually.
 
 ## Certified replay
 
@@ -217,13 +229,44 @@ pure sequence path only; it is not evidence of stateful EVM execution.
 `P: PureU256Property`. Their sequence counterparts accept only
 `P: PureU256ActionSeqProperty<N>`. Both `evaluate` methods have an empty Fe
 effect row, so effectful counters or mutable-history dependencies cannot cross
-the public certification boundary. Effect-forwarding callable adapters exist only as
-`pub(ingot)` test and instrumentation primitives. The prevalidated shrink
+the public certification boundary. Effect-forwarding callable adapters exist
+only as `pub(ingot)` test and instrumentation primitives. The prevalidated shrink
 primitive is likewise ingot-internal; the checked runner and replay establish
 its original-failure precondition.
 
 Stateful EVM properties require a separate adapter that creates a fresh fixture
 and model for every evaluation. That adapter is not implemented in this slice.
+
+## Stateful identity and admission foundation
+
+The implemented stateful foundation does not execute EVM properties. It defines
+a fixed deployment plan, a complete logical evaluation context, the canonical
+fixture salt above, and ingot-internal preflight primitives that check both
+state-evaluation and deployment capacity before committing any work. A rejected
+admission returns the input statistics unchanged. An accepted admission increments only
+`fixture_evaluations` and returns the required deployment count. That count is
+not a persistent reservation. Before another admission, the future scheduler
+must complete and account for the admitted fixture; inconsistent prior
+`fixture_evaluations` and `contract_deployments` are rejected. Attempts,
+property evaluations, deployments, actions, and shrink counters remain the
+responsibility of that future scheduler and fixture executor.
+
+These low-level primitives require the future scheduler to validate the global
+RunConfig, codec, and caps first; they are not a public certified boundary.
+Plan validation then requires a nonzero deployments-per-evaluation count and
+checks
+`max_state_evaluations <= max_deployments / deployments_per_evaluation`, using
+division to avoid overflow. A zero state-evaluation budget is valid; attempting
+an evaluation under it is rejected before any counter changes.
+
+`StatefulRunRegistry` is a bounded, caller-owned duplicate detector for
+`(suite_id, run_namespace)` pairs. Duplicate detection has precedence over a
+full-registry error. The registry proves only the history carried by that
+caller: constructing a new registry resets it, so it is not an EVM-global
+namespace guarantee.
+
+No CREATE2 deployment, proxy actor, model execution, stateful runner, stateful
+capsule, or stateful replay is claimed by this foundation.
 
 ## Action sequence boundary
 

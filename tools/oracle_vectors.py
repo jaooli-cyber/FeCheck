@@ -279,7 +279,25 @@ action_seq_run_preimage, action_seq_run_hash = hash_word_fields(
     ],
 )
 
+fixture_preimage, fixture_hash = hash_word_fields(
+    "FECHECK/FIXTURE/V1",
+    [
+        as_int(action_seq_run_hash),
+        31,
+        41,
+        7,
+        4,
+        0,
+        1,
+    ],
+)
+
 VECTORS = {
+    "fixture": (
+        fixture_preimage,
+        fixture_hash,
+        "b05382ae85f59ba83741fd249973c169fe353b27479f9b0136e8db06b795912b",
+    ),
     "action_seq_strategy_max0": (
         action_seq_max0_preimage,
         action_seq_max0_hash,

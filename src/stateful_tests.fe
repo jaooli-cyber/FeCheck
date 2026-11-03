@@ -1,0 +1,413 @@
+use ingot::{
+    ERROR_STATEFUL_ACCOUNTING_MISMATCH,
+    ERROR_STATEFUL_EVALUATION_BUDGET,
+    ERROR_STATEFUL_FIXTURE_PLAN_ZERO,
+    ERROR_STATEFUL_RUN_DUPLICATE,
+    ERROR_STATEFUL_RUN_REGISTRY_FULL,
+    ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET,
+    FIXTURE_ROLE_ACTOR_A_V1,
+    FIXTURE_ROLE_ACTOR_B_V1,
+    FIXTURE_ROLE_TARGET_V1,
+    ErrorCode,
+    FixtureRole,
+    RunConfig,
+    RunStats,
+    STATEFUL_RUN_REGISTRY_CAPACITY_V1,
+    StatefulAdmission,
+    StatefulEvaluationContext,
+    StatefulFixturePlan,
+    StatefulRunRegistry,
+    StatefulRunRegistryClaim,
+    action_seq_u256_codec_fingerprint,
+    admit_stateful_evaluation,
+    empty_run_stats,
+    fixture_role_tag_v1,
+    stateful_fixture_salt,
+    stateful_run_registry_claim,
+    stateful_run_registry_contains,
+    stateful_run_registry_empty,
+    stateful_run_registry_len,
+    validate_stateful_fixture_plan,
+}
+
+fn stateful_config(_ state_limit: u256, _ deployment_limit: u256) -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases: 1,
+        max_discards: 0,
+        max_shrink_evaluations: 0,
+        max_state_evaluations: state_limit,
+        max_deployments: deployment_limit,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+fn three_deployments() -> StatefulFixturePlan {
+    StatefulFixturePlan { deployments_per_evaluation: 3 }
+}
+
+fn option_error_kind(_ value: Option<ErrorCode>) -> u256 {
+    match value {
+        Option::Some(error) => error.kind,
+        Option::None => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn assert_stats_equal(_ left: RunStats, _ right: RunStats) {
+    assert!(left.attempts == right.attempts)
+    assert!(left.valid_cases == right.valid_cases)
+    assert!(left.discards == right.discards)
+    assert!(left.property_evaluations == right.property_evaluations)
+    assert!(left.fixture_evaluations == right.fixture_evaluations)
+    assert!(left.contract_deployments == right.contract_deployments)
+    assert!(left.actions_executed == right.actions_executed)
+}
+
+fn expect_claimed(_ claim: StatefulRunRegistryClaim) -> StatefulRunRegistry {
+    match claim {
+        StatefulRunRegistryClaim::Claimed { registry } => registry,
+        StatefulRunRegistryClaim::Rejected { error: _, registry } => {
+            assert!(false)
+            registry
+        },
+    }
+}
+
+#[test]
+fn fixture_roles_and_every_context_field_bind_the_salt() {
+    assert!(
+        fixture_role_tag_v1(FixtureRole::Target) == FIXTURE_ROLE_TARGET_V1,
+    )
+    assert!(
+        fixture_role_tag_v1(FixtureRole::ActorA) == FIXTURE_ROLE_ACTOR_A_V1,
+    )
+    assert!(
+        fixture_role_tag_v1(FixtureRole::ActorB) == FIXTURE_ROLE_ACTOR_B_V1,
+    )
+    assert!(FIXTURE_ROLE_TARGET_V1 == 1)
+    assert!(FIXTURE_ROLE_ACTOR_A_V1 == 2)
+    assert!(FIXTURE_ROLE_ACTOR_B_V1 == 3)
+
+    let context = StatefulEvaluationContext {
+        run_fingerprint: 11,
+        suite_id: 31,
+        run_namespace: 41,
+        master_seed: 7,
+        attempt_index: 2,
+        local_evaluation_index: 0,
+    }
+    let target = stateful_fixture_salt(context, FixtureRole::Target)
+    assert!(
+        target == stateful_fixture_salt(context, FixtureRole::Target),
+    )
+    assert!(
+        target != stateful_fixture_salt(context, FixtureRole::ActorA),
+    )
+    assert!(
+        target != stateful_fixture_salt(context, FixtureRole::ActorB),
+    )
+    assert!(
+        stateful_fixture_salt(context, FixtureRole::ActorA)
+            != stateful_fixture_salt(context, FixtureRole::ActorB),
+    )
+
+    var changed = context
+    changed.run_fingerprint += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.suite_id += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.run_namespace += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.master_seed += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.attempt_index += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.local_evaluation_index = 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+
+    let oracle_context = StatefulEvaluationContext {
+        run_fingerprint: 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b,
+        suite_id: 31,
+        run_namespace: 41,
+        master_seed: 7,
+        attempt_index: 4,
+        local_evaluation_index: 0,
+    }
+    assert!(
+        stateful_fixture_salt(oracle_context, FixtureRole::Target)
+            == 0xb05382ae85f59ba83741fd249973c169fe353b27479f9b0136e8db06b795912b,
+    )
+}
+
+#[test]
+fn fixture_plan_validation_uses_division_and_accepts_zero_state_budget() {
+    assert!(
+        validate_stateful_fixture_plan(stateful_config(2, 6), three_deployments()).is_none(),
+    )
+    assert!(
+        validate_stateful_fixture_plan(stateful_config(0, 0), three_deployments()).is_none(),
+    )
+    assert!(
+        option_error_kind(
+                validate_stateful_fixture_plan(
+                    stateful_config(2, 6),
+                    StatefulFixturePlan { deployments_per_evaluation: 0 },
+                ),
+            )
+            == ERROR_STATEFUL_FIXTURE_PLAN_ZERO,
+    )
+    assert!(
+        option_error_kind(
+                validate_stateful_fixture_plan(stateful_config(2, 5), three_deployments()),
+            )
+            == ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET,
+    )
+
+    let maximum = u256::max()
+    assert!(
+        validate_stateful_fixture_plan(
+            stateful_config(1, maximum),
+            StatefulFixturePlan { deployments_per_evaluation: maximum },
+        )
+            .is_none(),
+    )
+    assert!(
+        option_error_kind(
+                validate_stateful_fixture_plan(
+                    stateful_config(maximum, maximum),
+                    StatefulFixturePlan { deployments_per_evaluation: 2 },
+                ),
+            )
+            == ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET,
+    )
+}
+
+#[test]
+fn admission_is_atomic_and_commits_only_the_fixture_counter() {
+    var before = empty_run_stats()
+    before.attempts = 5
+    before.valid_cases = 3
+    before.discards = 2
+    before.property_evaluations = 8
+    before.contract_deployments = 0
+    before.actions_executed = 7
+
+    match admit_stateful_evaluation(stateful_config(2, 6), three_deployments(), before) {
+        StatefulAdmission::Admitted { stats, required_deployments } => {
+            assert!(required_deployments == 3)
+            assert!(
+                stats.fixture_evaluations == before.fixture_evaluations + 1,
+            )
+            var expected = before
+            expected.fixture_evaluations += 1
+            assert_stats_equal(stats, expected)
+            assert!(stats.contract_deployments == before.contract_deployments)
+
+            match admit_stateful_evaluation(stateful_config(2, 6), three_deployments(), stats) {
+                StatefulAdmission::Rejected { error, stats: rejected } => {
+                    assert!(error.kind == ERROR_STATEFUL_ACCOUNTING_MISMATCH)
+                    assert_stats_equal(rejected, stats)
+                },
+                _ => assert!(false),
+            }
+        },
+        StatefulAdmission::Rejected { error: _, stats: _ } => assert!(false),
+    }
+}
+
+#[test]
+fn every_admission_rejection_preserves_the_input_statistics() {
+    var before = empty_run_stats()
+    before.attempts = 2
+    before.valid_cases = 1
+    before.discards = 1
+    before.property_evaluations = 2
+    before.actions_executed = 1
+
+    match admit_stateful_evaluation(
+        stateful_config(1, 3),
+        StatefulFixturePlan { deployments_per_evaluation: 0 },
+        before,
+    ) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_FIXTURE_PLAN_ZERO)
+            assert_stats_equal(stats, before)
+        },
+        _ => assert!(false),
+    }
+
+    match admit_stateful_evaluation(stateful_config(0, 0), three_deployments(), before) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_EVALUATION_BUDGET)
+            assert_stats_equal(stats, before)
+        },
+        _ => assert!(false),
+    }
+
+    var incomplete_fixture = before
+    incomplete_fixture.fixture_evaluations = 2
+    match admit_stateful_evaluation(
+        stateful_config(2, 6),
+        three_deployments(),
+        incomplete_fixture,
+    ) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_ACCOUNTING_MISMATCH)
+            assert_stats_equal(stats, incomplete_fixture)
+        },
+        _ => assert!(false),
+    }
+
+    var exhausted_state = before
+    exhausted_state.fixture_evaluations = 2
+    exhausted_state.contract_deployments = 6
+    match admit_stateful_evaluation(
+        stateful_config(2, 6),
+        three_deployments(),
+        exhausted_state,
+    ) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_EVALUATION_BUDGET)
+            assert_stats_equal(stats, exhausted_state)
+        },
+        _ => assert!(false),
+    }
+
+    match admit_stateful_evaluation(stateful_config(2, 5), three_deployments(), before) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET)
+            assert_stats_equal(stats, before)
+        },
+        _ => assert!(false),
+    }
+
+    var insufficient_remaining = before
+    insufficient_remaining.contract_deployments = 4
+    match admit_stateful_evaluation(
+        stateful_config(2, 6),
+        three_deployments(),
+        insufficient_remaining,
+    ) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_ACCOUNTING_MISMATCH)
+            assert_stats_equal(stats, insufficient_remaining)
+        },
+        _ => assert!(false),
+    }
+
+    var already_over = before
+    already_over.contract_deployments = 7
+    match admit_stateful_evaluation(stateful_config(2, 6), three_deployments(), already_over) {
+        StatefulAdmission::Rejected { error, stats } => {
+            assert!(error.kind == ERROR_STATEFUL_ACCOUNTING_MISMATCH)
+            assert_stats_equal(stats, already_over)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn admission_accepts_the_exact_state_and_deployment_boundary() {
+    var stats = empty_run_stats()
+    stats.fixture_evaluations = 1
+    stats.contract_deployments = 3
+    match admit_stateful_evaluation(stateful_config(2, 6), three_deployments(), stats) {
+        StatefulAdmission::Admitted { stats: admitted, required_deployments } => {
+            assert!(admitted.fixture_evaluations == 2)
+            assert!(admitted.contract_deployments == 3)
+            assert!(required_deployments == 3)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn caller_owned_registry_distinguishes_pairs_and_rejects_duplicates() {
+    let empty = stateful_run_registry_empty()
+    assert!(stateful_run_registry_len(empty) == 0)
+    assert!(!stateful_run_registry_contains(empty, 1, 2))
+
+    let first = expect_claimed(stateful_run_registry_claim(empty, 1, 2))
+    assert!(stateful_run_registry_len(first) == 1)
+    assert!(stateful_run_registry_contains(first, 1, 2))
+
+    match stateful_run_registry_claim(first, 1, 2) {
+        StatefulRunRegistryClaim::Rejected { error, registry } => {
+            assert!(error.kind == ERROR_STATEFUL_RUN_DUPLICATE)
+            assert!(error.detail == 2)
+            assert!(stateful_run_registry_len(registry) == 1)
+            assert!(stateful_run_registry_contains(registry, 1, 2))
+        },
+        _ => assert!(false),
+    }
+
+    let same_suite = expect_claimed(stateful_run_registry_claim(first, 1, 3))
+    assert!(stateful_run_registry_len(same_suite) == 2)
+    let same_namespace = expect_claimed(stateful_run_registry_claim(same_suite, 2, 2))
+    assert!(stateful_run_registry_len(same_namespace) == 3)
+    assert!(stateful_run_registry_contains(same_namespace, 1, 3))
+    assert!(stateful_run_registry_contains(same_namespace, 2, 2))
+
+    let reset = stateful_run_registry_empty()
+    assert!(!stateful_run_registry_contains(reset, 1, 2))
+}
+
+#[test]
+fn caller_owned_registry_has_a_fixed_capacity_and_stable_precedence() {
+    var registry = stateful_run_registry_empty()
+    var index: usize = 0
+    while index < STATEFUL_RUN_REGISTRY_CAPACITY_V1 {
+        registry = expect_claimed(
+            stateful_run_registry_claim(registry, 100 + index as u256, 200 + index as u256),
+        )
+        index += 1
+    }
+    assert!(
+        stateful_run_registry_len(registry) == STATEFUL_RUN_REGISTRY_CAPACITY_V1,
+    )
+
+    match stateful_run_registry_claim(registry, 100, 200) {
+        StatefulRunRegistryClaim::Rejected { error, registry: unchanged } => {
+            assert!(error.kind == ERROR_STATEFUL_RUN_DUPLICATE)
+            assert!(
+                stateful_run_registry_len(unchanged) == STATEFUL_RUN_REGISTRY_CAPACITY_V1,
+            )
+        },
+        _ => assert!(false),
+    }
+
+    match stateful_run_registry_claim(registry, 999, 1000) {
+        StatefulRunRegistryClaim::Rejected { error, registry: unchanged } => {
+            assert!(error.kind == ERROR_STATEFUL_RUN_REGISTRY_FULL)
+            assert!(error.detail == STATEFUL_RUN_REGISTRY_CAPACITY_V1 as u256)
+            assert!(
+                stateful_run_registry_len(unchanged) == STATEFUL_RUN_REGISTRY_CAPACITY_V1,
+            )
+            assert!(!stateful_run_registry_contains(unchanged, 999, 1000))
+        },
+        _ => assert!(false),
+    }
+}

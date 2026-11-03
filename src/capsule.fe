@@ -217,10 +217,7 @@ pub(ingot) fn replay_run_stats_error_for_evidence(
     if run.property_evaluations != run.attempts + shrink.evaluations {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 10 })
     }
-    if run.state_evaluations != 0
-        || run.fixture_evaluations != 0
-        || run.contract_deployments != 0
-        || run.actions_executed != 0 {
+    if run.fixture_evaluations != 0 || run.contract_deployments != 0 || run.actions_executed != 0 {
         return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 11 })
     }
     Option::None

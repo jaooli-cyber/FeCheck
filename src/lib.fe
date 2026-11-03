@@ -9,6 +9,7 @@ pub use pure_runner::*
 pub use replay::*
 pub use runner::*
 pub use scalar::*
+pub use stateful::*
 pub use strategy::*
 
 /// Version of FeCheck's public deterministic format.

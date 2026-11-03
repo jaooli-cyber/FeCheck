@@ -246,7 +246,6 @@ fn pure_sequence_runner_restarts_structural_shrinking_and_preserves_accounting()
             assert!(
                 stats.property_evaluations == stats.attempts + shrink.evaluations,
             )
-            assert!(stats.state_evaluations == 0)
             assert!(stats.fixture_evaluations == 0)
             assert!(stats.contract_deployments == 0)
             assert!(stats.actions_executed == 0)

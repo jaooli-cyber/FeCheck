@@ -24,7 +24,6 @@ pub struct RunStats {
     pub valid_cases: u256,
     pub discards: u256,
     pub property_evaluations: u256,
-    pub state_evaluations: u256,
     pub fixture_evaluations: u256,
     pub contract_deployments: u256,
     pub actions_executed: u256,

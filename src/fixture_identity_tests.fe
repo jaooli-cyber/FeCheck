@@ -1,0 +1,56 @@
+use ingot::canonical_fixture_salt
+use std::evm::packed::Packed
+
+const RUN_FINGERPRINT: u256 = 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b
+const FIXTURE_SALT: u256 = 0xb05382ae85f59ba83741fd249973c169fe353b27479f9b0136e8db06b795912b
+
+fn push_fixture_field(_ out: mut Packed, _ tag: u256, _ value: u256) {
+    out.u256(tag)
+    out.u256(32)
+    out.u256(value)
+}
+
+fn independent_fixture_preimage(
+    _ run_fingerprint: u256,
+    _ suite_id: u256,
+    _ namespace: u256,
+    _ master_seed: u256,
+    _ attempt_index: u256,
+    _ local_evaluation_index: u256,
+    _ role_tag: u256,
+) -> Packed {
+    var out = Packed::with_capacity(bytes: 754)
+    out.u256(18)
+    out.string("FECHECK/FIXTURE/V1" as String<18>)
+    out.u256(7)
+    push_fixture_field(mut out, 1, run_fingerprint)
+    push_fixture_field(mut out, 2, suite_id)
+    push_fixture_field(mut out, 3, namespace)
+    push_fixture_field(mut out, 4, master_seed)
+    push_fixture_field(mut out, 5, attempt_index)
+    push_fixture_field(mut out, 6, local_evaluation_index)
+    push_fixture_field(mut out, 7, role_tag)
+    out
+}
+
+#[test]
+fn fixture_preimage_and_salt_match_the_independent_oracle() {
+    let preimage = independent_fixture_preimage(RUN_FINGERPRINT, 31, 41, 7, 4, 0, 1)
+    assert!(preimage.len() == 754)
+    assert!(preimage.keccak256() == FIXTURE_SALT)
+    assert!(
+        canonical_fixture_salt(RUN_FINGERPRINT, 31, 41, 7, 4, 0, 1) == FIXTURE_SALT,
+    )
+}
+
+#[test]
+fn every_fixture_identity_field_changes_the_salt() {
+    let base = canonical_fixture_salt(1, 2, 3, 4, 5, 6, 7)
+    assert!(base != canonical_fixture_salt(101, 2, 3, 4, 5, 6, 7))
+    assert!(base != canonical_fixture_salt(1, 102, 3, 4, 5, 6, 7))
+    assert!(base != canonical_fixture_salt(1, 2, 103, 4, 5, 6, 7))
+    assert!(base != canonical_fixture_salt(1, 2, 3, 104, 5, 6, 7))
+    assert!(base != canonical_fixture_salt(1, 2, 3, 4, 105, 6, 7))
+    assert!(base != canonical_fixture_salt(1, 2, 3, 4, 5, 106, 7))
+    assert!(base != canonical_fixture_salt(1, 2, 3, 4, 5, 6, 107))
+}
