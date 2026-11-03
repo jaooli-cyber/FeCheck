@@ -36,7 +36,7 @@ pub fn run_fingerprint(_ generation: u256, _ config: RunConfig) -> u256 {
     keccak_words(
         [
             DOMAIN_RUN_V1,
-            8,
+            9,
             1,
             generation,
             2,
@@ -48,10 +48,12 @@ pub fn run_fingerprint(_ generation: u256, _ config: RunConfig) -> u256 {
             5,
             config.max_discards,
             6,
-            config.max_shrink_evaluations,
+            config.max_attempts,
             7,
-            config.format_version,
+            config.max_shrink_evaluations,
             8,
+            config.format_version,
+            9,
             config.codec_version,
         ],
     )

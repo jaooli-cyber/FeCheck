@@ -108,3 +108,61 @@ fn fingerprints_and_value_digests_bind_every_identity_field() {
     )
     assert!(value_digest(a_fp, 12) != value_digest(a_fp, 13))
 }
+#[test]
+fn golden_strategy_fingerprint_matches_external_keccak() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    assert!(
+        u256_strategy_fingerprint(strategy)
+            == 0x35b9ba2e0dbebe8be06a0ae08d26d5ed7cdd03e26bd8f338e0a16025c2f81ecf,
+    )
+}
+
+#[test]
+fn golden_generation_fingerprint_matches_external_keccak() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let strategy_fp = u256_strategy_fingerprint(strategy)
+    assert!(
+        generation_fingerprint(strategy_fp)
+            == 0x0a92a7c207546705203a70895118fadcd39eb2e959f44fbc218c942743f27631,
+    )
+}
+
+#[test]
+fn golden_attempt_seed_matches_external_keccak() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let generation = generation_fingerprint(u256_strategy_fingerprint(strategy))
+    assert!(
+        attempt_seed(7, 3, generation)
+            == 0xaa79dffeeb49ac62734cc93f7700462fe125eb908d57fe6f72ac922c5c35043d,
+    )
+}
+
+#[test]
+fn golden_value_digest_matches_external_keccak() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let strategy_fp = u256_strategy_fingerprint(strategy)
+    assert!(
+        value_digest(strategy_fp, 12)
+            == 0xbb31de1e9bcf58154c7586dda2d25964d6275c36355320d61ba9d7aed1a549e6,
+    )
+}
+
+#[test]
+fn golden_run_fingerprint_matches_external_keccak() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let generation = generation_fingerprint(u256_strategy_fingerprint(strategy))
+    let config = RunConfig {
+        suite_id: 1,
+        namespace: 2,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_attempts: 20,
+        max_shrink_evaluations: 100,
+        format_version: 1,
+        codec_version: 1,
+    }
+    assert!(
+        run_fingerprint(generation, config)
+            == 0x780ef7917d69d30d0f0269b75384e87cab536497ae0e92b6707476fb21774705,
+    )
+}
