@@ -292,6 +292,330 @@ fixture_preimage, fixture_hash = hash_word_fields(
     ],
 )
 
+# AccountingLedger C6a uses a compact one-word action domain.  These values are
+# intentionally computed without importing FeCheck so the Python oracle remains
+# an independent implementation of the canonical encoding and RNG chain.
+LEDGER_LO = 0
+LEDGER_HI = 30
+LEDGER_ORIGIN = 1
+LEDGER_CAPACITY = 3
+LEDGER_MAX_ACTIONS = 3
+LEDGER_MASTER_SEED = 1608
+LEDGER_ATTEMPT_INDEX = 3
+LEDGER_MAX_RNG_REJECTIONS = 64
+
+ledger_bounds_descriptor = as_int(
+    keccak256(u256(LEDGER_LO) + u256(LEDGER_HI))
+)
+ledger_scalar_edges_descriptor = as_int(
+    keccak256(
+        u256(3)
+        + u256(LEDGER_LO)
+        + u256(LEDGER_ORIGIN)
+        + u256(LEDGER_HI)
+    )
+)
+ledger_scalar_preimage, ledger_scalar_hash = hash_word_fields(
+    "FECHECK/STRATEGY/V1",
+    [
+        1,
+        ledger_bounds_descriptor,
+        LEDGER_ORIGIN,
+        0,
+        0,
+        0,
+        ledger_scalar_edges_descriptor,
+        1,
+        1,
+        1,
+    ],
+)
+
+ledger_empty_hash = keccak256(encode_action_seq([]))
+ledger_one_hash = keccak256(encode_action_seq([LEDGER_ORIGIN]))
+ledger_three_hash = keccak256(
+    encode_action_seq([LEDGER_ORIGIN, LEDGER_ORIGIN, LEDGER_ORIGIN])
+)
+ledger_sequence_edges_descriptor = as_int(
+    keccak256(
+        u256(3) + ledger_empty_hash + ledger_one_hash + ledger_three_hash
+    )
+)
+ledger_sequence_preimage, ledger_sequence_hash = hash_word_fields(
+    "FECHECK/STRATEGY/V1",
+    [
+        3,
+        0,
+        as_int(ledger_empty_hash),
+        LEDGER_CAPACITY,
+        LEDGER_MAX_ACTIONS,
+        as_int(ledger_scalar_hash),
+        ledger_sequence_edges_descriptor,
+        1,
+        1,
+        1,
+    ],
+)
+ledger_generation_preimage, ledger_generation_hash = hash_word_fields(
+    "FECHECK/GENERATION/V1", [1, 1, as_int(ledger_sequence_hash)]
+)
+ledger_attempt_preimage, ledger_attempt_hash = hash_word_fields(
+    "FECHECK/ATTEMPT/V1",
+    [
+        LEDGER_MASTER_SEED,
+        LEDGER_ATTEMPT_INDEX,
+        as_int(ledger_generation_hash),
+    ],
+)
+
+ledger_draw0_preimage = ledger_attempt_hash
+ledger_draw0_hash = keccak256(ledger_draw0_preimage)
+ledger_draw1_preimage = ledger_draw0_hash
+ledger_draw1_hash = keccak256(ledger_draw1_preimage)
+ledger_draw2_preimage = ledger_draw1_hash
+ledger_draw2_hash = keccak256(ledger_draw2_preimage)
+ledger_draw3_preimage = ledger_draw2_hash
+ledger_draw3_hash = keccak256(ledger_draw3_preimage)
+
+LEDGER_HASH_VECTORS = {
+    "accounting_ledger_scalar_strategy": (
+        ledger_scalar_preimage,
+        ledger_scalar_hash,
+        "d2ea76fb4727d2d963519393fbd3da268fefd347649838588a14f0733cb38135",
+    ),
+    "accounting_ledger_sequence_strategy": (
+        ledger_sequence_preimage,
+        ledger_sequence_hash,
+        "6ae4aa2ef26a8849817c65b1076ba384ca37d5dc5411c5ea95e0e149669f2a43",
+    ),
+    "accounting_ledger_generation": (
+        ledger_generation_preimage,
+        ledger_generation_hash,
+        "f725d808dea501290fa02d43b07786393c747a511c813d737ec264f40daed6f7",
+    ),
+    "accounting_ledger_attempt": (
+        ledger_attempt_preimage,
+        ledger_attempt_hash,
+        "16f357ec6dd0976b09f8a1e1892f60262163fb2493a5bf9e03c71903f4659097",
+    ),
+    "accounting_ledger_draw0": (
+        ledger_draw0_preimage,
+        ledger_draw0_hash,
+        "ecf88291f6935adb138233cd1e9d049e572de22ac4e75caf0f43f7ba139b65ef",
+    ),
+    "accounting_ledger_draw1": (
+        ledger_draw1_preimage,
+        ledger_draw1_hash,
+        "7deb7431205d73a50845c138366256954d607bec46ab02a07ca640afc75ac4ad",
+    ),
+    "accounting_ledger_draw2": (
+        ledger_draw2_preimage,
+        ledger_draw2_hash,
+        "9e269d60b46410b560c6caa6c4231993cd2610753c1218396e9529605e338036",
+    ),
+    "accounting_ledger_draw3": (
+        ledger_draw3_preimage,
+        ledger_draw3_hash,
+        "8a201bc8b5b568757a7a5ea7afbcc934f9536b572c85a0c78c158cfc8350b58e",
+    ),
+}
+
+
+def ledger_uniform(state: bytes, upper: int) -> tuple[bytes, int]:
+    """Mirror KeccakRng.uniform, including rejection of modulo-biased words."""
+    threshold = (1 << 256) % upper
+    for _ in range(LEDGER_MAX_RNG_REJECTIONS):
+        state = keccak256(state)
+        word = as_int(state)
+        if word >= threshold:
+            return state, word % upper
+    raise AssertionError("AccountingLedger RNG exceeded the V1 rejection cap")
+
+
+def ledger_attempt(attempt_index: int) -> tuple[list[int], list[int], list[bytes]]:
+    if attempt_index == 0:
+        return [], [], []
+    if attempt_index == 1:
+        return [LEDGER_ORIGIN], [], []
+    if attempt_index == 2:
+        return [LEDGER_ORIGIN] * LEDGER_MAX_ACTIONS, [], []
+
+    _, seed = hash_word_fields(
+        "FECHECK/ATTEMPT/V1",
+        [LEDGER_MASTER_SEED, attempt_index, as_int(ledger_generation_hash)],
+    )
+    draws = []
+    reduced = []
+    seed, logical_len = ledger_uniform(seed, LEDGER_MAX_ACTIONS + 1)
+    draws.append(seed)
+    reduced.append(logical_len)
+    physical = []
+    for _ in range(LEDGER_CAPACITY):
+        seed, action = ledger_uniform(seed, LEDGER_HI - LEDGER_LO + 1)
+        draws.append(seed)
+        reduced.append(action)
+        physical.append(action)
+    return physical[:logical_len], reduced, draws
+
+
+def decode_ledger_action(word: int) -> tuple[str, int, int, int] | None:
+    if word < LEDGER_LO or word > LEDGER_HI:
+        return None
+    amount = word & 0x3
+    actor = (word >> 2) & 0x1
+    recipient = (word >> 3) & 0x1
+    kind = (word >> 4) & 0x1
+    if amount == 3:
+        return None
+    if kind == 0:
+        if recipient != 0:
+            return None
+        return "deposit", actor, actor, amount
+    return "transfer", actor, recipient, amount
+
+
+def evaluate_ledger(
+    actions: list[int], *, fixed: bool = False
+) -> tuple[str, int]:
+    """Pure reference model plus an independent buggy/fixed target simulation."""
+    model = [0, 0, 0]
+    target = [0, 0, 0]
+    executed = 0
+
+    for word in actions:
+        action = decode_ledger_action(word)
+        if action is None:
+            return "D", executed
+        kind, source, recipient, amount = action
+        if amount == 0:
+            return "D", executed
+        if kind == "transfer" and model[source] < amount:
+            return "D", executed
+
+        predicted = model.copy()
+        if kind == "deposit":
+            predicted[source] += amount
+            predicted[2] += amount
+            target[source] += amount
+            target[2] += amount
+        else:
+            if source != recipient:
+                predicted[source] -= amount
+                predicted[recipient] += amount
+
+            if not (fixed and source == recipient):
+                source_before = target[source]
+                recipient_before = target[recipient]
+                target[source] = source_before - amount
+                target[recipient] = recipient_before + amount
+
+        executed += 1
+        if target[2] != target[0] + target[1]:
+            return "F", executed
+        if target != predicted:
+            return "K", executed
+        model = predicted
+
+    return "P", executed
+
+
+def scalar_shrink_candidates(origin: int, current: int):
+    distance = abs(current - origin)
+    if distance == 0:
+        return
+    yield origin
+    if distance == 1:
+        return
+
+    step = distance // 2 + distance % 2
+    while step != 0:
+        if current > origin:
+            yield current - step
+        else:
+            yield current + step
+        if step == 1:
+            return
+        step = step // 2 + step % 2
+
+
+def ledger_shrink_candidates(actions: list[int]):
+    length = len(actions)
+    for block_len in range(length, 0, -1):
+        seen = set()
+        for start in range(0, length - block_len + 1):
+            candidate = actions[:start] + actions[start + block_len :]
+            key = tuple(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield candidate
+
+    for index, word in enumerate(actions):
+        for candidate_word in scalar_shrink_candidates(LEDGER_ORIGIN, word):
+            candidate = actions.copy()
+            candidate[index] = candidate_word
+            yield candidate
+
+
+def shrink_ledger(original: list[int]):
+    failure, _ = evaluate_ledger(original)
+    if failure != "F":
+        raise AssertionError("AccountingLedger original does not falsify conservation")
+
+    current = original.copy()
+    trace = []
+    counters = {
+        "evaluations": 0,
+        "accepted": 0,
+        "rejected_pass": 0,
+        "rejected_discard": 0,
+        "rejected_failure_key": 0,
+    }
+    actions_executed = 0
+
+    while True:
+        accepted = False
+        for candidate in ledger_shrink_candidates(current):
+            verdict, executed = evaluate_ledger(candidate)
+            trace.append((candidate, verdict))
+            counters["evaluations"] += 1
+            actions_executed += executed
+            if verdict == failure:
+                counters["accepted"] += 1
+                current = candidate
+                accepted = True
+                break
+            if verdict == "P":
+                counters["rejected_pass"] += 1
+            elif verdict == "D":
+                counters["rejected_discard"] += 1
+            else:
+                counters["rejected_failure_key"] += 1
+        if not accepted:
+            return current, trace, counters, actions_executed
+
+
+LEDGER_EXPECTED_TRACE = [
+    ([], "P"),
+    ([25], "D"),
+    ([2], "P"),
+    ([17, 25], "D"),
+    ([2, 25], "P"),
+    ([2, 17], "F"),
+    ([], "P"),
+    ([17], "D"),
+    ([2], "P"),
+    ([1, 17], "F"),
+    ([], "P"),
+    ([17], "D"),
+    ([1], "P"),
+    ([1, 1], "P"),
+    ([1, 9], "D"),
+    ([1, 13], "D"),
+    ([1, 15], "D"),
+    ([1, 16], "D"),
+]
+
 VECTORS = {
     "fixture": (
         fixture_preimage,
@@ -456,7 +780,176 @@ VECTORS = {
 }
 
 
+def verify_accounting_ledger_vectors() -> None:
+    for name, (payload, digest, expected_hex) in LEDGER_HASH_VECTORS.items():
+        actual_hex = digest.hex()
+        if actual_hex != expected_hex:
+            raise AssertionError(f"{name}: expected {expected_hex}, got {actual_hex}")
+        print(f"{name}.preimage.len={len(payload)}")
+        print(f"{name}.preimage.hex={payload.hex()}")
+        print(f"{name}.keccak256=0x{actual_hex}")
+
+    reserved = [
+        word
+        for word in range(LEDGER_LO, LEDGER_HI + 1)
+        if decode_ledger_action(word) is None
+    ]
+    expected_reserved = [3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 23, 27]
+    if reserved != expected_reserved:
+        raise AssertionError(
+            f"AccountingLedger reserved words: expected {expected_reserved}, got {reserved}"
+        )
+    canonical = [
+        decode_ledger_action(word)
+        for word in range(LEDGER_LO, LEDGER_HI + 1)
+        if decode_ledger_action(word) is not None
+    ]
+    if len(canonical) != 18:
+        raise AssertionError(
+            f"AccountingLedger canonical domain: expected 18 actions, got {len(canonical)}"
+        )
+    if sum(action[3] == 0 for action in canonical) != 6:
+        raise AssertionError("AccountingLedger must have six canonical zero actions")
+
+    original, reduced_draws, raw_draws = ledger_attempt(LEDGER_ATTEMPT_INDEX)
+    expected_raw_draws = [
+        ledger_draw0_hash,
+        ledger_draw1_hash,
+        ledger_draw2_hash,
+        ledger_draw3_hash,
+    ]
+    if raw_draws != expected_raw_draws:
+        raise AssertionError("AccountingLedger RNG chain differs from its golden")
+    if reduced_draws != [3, 2, 17, 25]:
+        raise AssertionError(
+            f"AccountingLedger reduced draws: expected [3, 2, 17, 25], "
+            f"got {reduced_draws}"
+        )
+    if original != [2, 17, 25]:
+        raise AssertionError(
+            f"AccountingLedger original: expected [2, 17, 25], got {original}"
+        )
+    original_semantics = [decode_ledger_action(word) for word in original]
+    expected_semantics = [
+        ("deposit", 0, 0, 2),
+        ("transfer", 0, 0, 1),
+        ("transfer", 0, 1, 1),
+    ]
+    if original_semantics != expected_semantics:
+        raise AssertionError(
+            f"AccountingLedger original semantics changed: {original_semantics}"
+        )
+
+    original_attempts = [ledger_attempt(index)[0] for index in range(4)]
+    if original_attempts != [[], [1], [1, 1, 1], [2, 17, 25]]:
+        raise AssertionError(
+            f"AccountingLedger attempts 0..3 changed: {original_attempts}"
+        )
+    original_results = [evaluate_ledger(value) for value in original_attempts]
+    if original_results != [("P", 0), ("P", 1), ("P", 3), ("F", 2)]:
+        raise AssertionError(
+            f"AccountingLedger original accounting changed: {original_results}"
+        )
+
+    minimal, trace, shrink, shrink_actions = shrink_ledger(original)
+    if minimal != [1, 17]:
+        raise AssertionError(
+            f"AccountingLedger minimal: expected [1, 17], got {minimal}"
+        )
+    if trace != LEDGER_EXPECTED_TRACE:
+        raise AssertionError(
+            f"AccountingLedger shrink trace changed:\nexpected={LEDGER_EXPECTED_TRACE}\n"
+            f"actual={trace}"
+        )
+    expected_shrink = {
+        "evaluations": 18,
+        "accepted": 2,
+        "rejected_pass": 8,
+        "rejected_discard": 8,
+        "rejected_failure_key": 0,
+    }
+    if shrink != expected_shrink:
+        raise AssertionError(
+            f"AccountingLedger shrink counters: expected {expected_shrink}, got {shrink}"
+        )
+    if shrink_actions != 15:
+        raise AssertionError(
+            f"AccountingLedger shrink actions: expected 15, got {shrink_actions}"
+        )
+    total_actions = sum(executed for _, executed in original_results) + shrink_actions
+    if total_actions != 21:
+        raise AssertionError(
+            f"AccountingLedger total actions: expected 21, got {total_actions}"
+        )
+    buggy_stats = {
+        "attempts": len(original_attempts),
+        "valid_cases": sum(verdict == "P" for verdict, _ in original_results),
+        "discards": sum(verdict == "D" for verdict, _ in original_results),
+        "property_evaluations": len(original_attempts) + shrink["evaluations"],
+        "fixture_evaluations": len(original_attempts) + shrink["evaluations"],
+        "contract_deployments": 3
+        * (len(original_attempts) + shrink["evaluations"]),
+        "actions_executed": total_actions,
+    }
+    expected_buggy_stats = {
+        "attempts": 4,
+        "valid_cases": 3,
+        "discards": 0,
+        "property_evaluations": 22,
+        "fixture_evaluations": 22,
+        "contract_deployments": 66,
+        "actions_executed": 21,
+    }
+    if buggy_stats != expected_buggy_stats:
+        raise AssertionError(
+            f"AccountingLedger buggy stats: expected {expected_buggy_stats}, got {buggy_stats}"
+        )
+
+    fixed_results = [
+        evaluate_ledger(value, fixed=True) for value in original_attempts
+    ]
+    if fixed_results != [("P", 0), ("P", 1), ("P", 3), ("P", 3)]:
+        raise AssertionError(
+            f"AccountingLedger fixed comparison changed: {fixed_results}"
+        )
+    fixed_stats = {
+        "attempts": len(original_attempts),
+        "valid_cases": sum(verdict == "P" for verdict, _ in fixed_results),
+        "discards": sum(verdict == "D" for verdict, _ in fixed_results),
+        "property_evaluations": len(original_attempts),
+        "fixture_evaluations": len(original_attempts),
+        "contract_deployments": 3 * len(original_attempts),
+        "actions_executed": sum(executed for _, executed in fixed_results),
+    }
+    expected_fixed_stats = {
+        "attempts": 4,
+        "valid_cases": 4,
+        "discards": 0,
+        "property_evaluations": 4,
+        "fixture_evaluations": 4,
+        "contract_deployments": 12,
+        "actions_executed": 7,
+    }
+    if fixed_stats != expected_fixed_stats:
+        raise AssertionError(
+            f"AccountingLedger fixed stats: expected {expected_fixed_stats}, got {fixed_stats}"
+        )
+
+    print(f"accounting_ledger.reserved={reserved}")
+    print(f"accounting_ledger.draws.mod={reduced_draws}")
+    print(f"accounting_ledger.original={original}")
+    print(f"accounting_ledger.minimal={minimal}")
+    print(f"accounting_ledger.trace={trace}")
+    print(f"accounting_ledger.shrink={shrink}")
+    print(f"accounting_ledger.original_stats={buggy_stats}")
+    print(f"accounting_ledger.fixed_stats={fixed_stats}")
+
+
 def main() -> None:
+    if len(VECTORS) != 32:
+        raise AssertionError(
+            f"expected the 32 pre-C6a vectors to remain intact, got {len(VECTORS)}"
+        )
     for name, (payload, digest, expected_hex) in VECTORS.items():
         actual_hex = digest.hex()
         if actual_hex != expected_hex:
@@ -464,6 +957,8 @@ def main() -> None:
         print(f"{name}.preimage.len={len(payload)}")
         print(f"{name}.preimage.hex={payload.hex()}")
         print(f"{name}.keccak256=0x{actual_hex}")
+
+    verify_accounting_ledger_vectors()
 
 
 if __name__ == "__main__":

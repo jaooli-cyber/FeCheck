@@ -12,6 +12,12 @@ three-contract P0 fixture. Consumer-defined EVM callbacks remain a documented
 trust boundary, so this path is not certified and does not produce replay
 capsules.
 
+The separate AccountingLedger C6a demonstration applies that boundary to a
+two-actor ledger, exposes a self-transfer aliasing defect, and deterministically
+shrinks it to `Deposit(A,1), Transfer(A,A,1)`. A corrected target is exercised
+with the same generated workload. This remains experimental evidence, not a
+stateful replay or certification claim.
+
 ## What works now
 
 - explicit pass, discard, fail, infrastructure, and configuration outcomes;
@@ -55,12 +61,18 @@ capsules.
 - a separate stateful-runner ingot whose golden run performs eight fresh
   evaluations in one EVM, twenty-four direct typed CREATE2 deployments, eight
   actions through both bound actors, and a five-candidate shrink to length two;
+- a separate AccountingLedger ingot with a packed action word, pure
+  preview/commit model, bound ActorA/ActorB proxies, buggy and fixed targets,
+  failure-key-stable invariant precedence, and a curated seed whose current
+  shrink reaches the local witness `Deposit(A,1), Transfer(A,A,1)`;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
-  for every scalar strategy and run fingerprint field.
+  for every scalar strategy and run fingerprint field, plus independent C6a
+  fingerprints, RNG draws, model execution, shrink trace, and counters.
 
 The root ingot contains 97 passing Fe tests, the isolated EVM capability ingot
-contains 9, and the isolated stateful-runner ingot contains 2, for 108 passing
-Fe tests in total. The sequence tests include all
+contains 9, the isolated stateful-runner ingot contains 2, and the dedicated
+AccountingLedger ingot contains 14, for 122 passing Fe tests in total. The
+sequence tests include all
 small values in `0..2` at every logical length through three, comparison against
 an independent reference enumerator, exact shrink order and deduplication,
 private-tail independence, capacities zero through the deliberately supported
@@ -68,10 +80,12 @@ maximum of four, termination after all 1,038 worst-case candidates, RNG
 consumption across every physical slot, and canonical assertions backed by 32
 independent Python vectors, including the sequence run fingerprint, a non-edge
 attempt at index four through its complete RNG chain and value digest, and the
-754-byte fixture-salt preimage. Nine EVM probes separately verify the
-test-only deployment boundary. Two additional EVM tests exercise the
-experimental runner and its direct CREATE2 revert boundary without extending
-the certified capsule APIs.
+754-byte fixture-salt preimage. The C6a oracle retains all 32 earlier vectors
+and adds the AccountingLedger packed-domain fingerprints, seed 1608 attempt,
+four Keccak draws, exact shrink trace, and corrected 8/8 rejection accounting.
+Nine EVM probes separately verify the test-only deployment boundary. Two
+additional EVM tests exercise the experimental runner and its direct CREATE2
+revert boundary without extending the certified capsule APIs.
 
 ## Verify
 
@@ -82,18 +96,22 @@ fe --version
 fe fmt --check
 fe fmt --check tests/evm-probes
 fe fmt --check tests/stateful-runner
+fe fmt --check tests/accounting-ledger
 fe check . --profile dev
 fe check tests/evm-probes --profile dev
 fe check tests/stateful-runner --profile dev
+fe check tests/accounting-ledger --profile dev
 fe test . --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
+fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
 ```
 
 The root ingot is a library with no deployable contract. CI runs `fe build`
 against that root and fails if it emits any contract artifact. Deployable probe
 contracts live only in the separate `tests/evm-probes` and
-`tests/stateful-runner` ingots.
+`tests/stateful-runner` ingots; AccountingLedger targets and proxies live only
+in `tests/accounting-ledger`.
 
 The independent oracle also runs in CI but does not participate in the Fe
 runtime:
@@ -131,6 +149,9 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
   freshness, occupied-address, and revert-boundary evidence.
 - `tests/stateful-runner`: separate ingot containing the full experimental
   scheduler golden and its direct-collision boundary.
+- `tests/accounting-ledger`: separate C6a ingot containing the packed action
+  adapter, pure model, buggy/fixed ledger targets, bound proxies, and EVM
+  evidence.
 - `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`,
   `src/action_seq_capsule_tests.fe`, `src/fixture_identity_tests.fe`, and
   `src/stateful_tests.fe` plus `src/stateful_action_seq_runner_tests.fe`:
@@ -141,6 +162,8 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
 - `docs/EVM_PROBES.md`: exact EVM evidence and its claim boundary.
 - `docs/STATEFUL_RUNNER.md`: experimental scheduler protocol, evidence, and
   non-certification boundary.
+- `docs/ACCOUNTING_LEDGER.md`: C6a architecture, deterministic witness, shrink
+  accounting, fixed comparison, and honest claim boundary.
 
 ## Status and limitations
 
@@ -153,14 +176,16 @@ and the direct CREATE2 revert boundary. The experimental scheduler now assigns
 fresh identities to every original and shrink evaluation, enforces its budgets,
 and accounts for its fixed three-deployment fixture and executed-action
 receipts. Its isolated golden exercises a fresh fixture and local model on every
-candidate.
+candidate. AccountingLedger now supplies a concrete model-based consumer and a
+fixed-target comparison with the same deterministic generated sequence.
 
 This does not make the stateful path certified: Fe does not prove that the
 preflight is non-mutating or that a returning evaluator really completed the
 three deployments, and the current fingerprints do not bind adapter bytecode,
 model, or fixture policy. Stateful capsule/replay, external capsule
-serialization/decoding, the final AccountingLedger demo, and a bound adapter
-identity remain in development. Gate C is therefore still partial.
+serialization/decoding, and a bound adapter identity remain in development.
+The AccountingLedger seed is curated and its result is only a local minimum
+under the current shrink order. Gate C is therefore still partial.
 
 See [PROVENANCE.md](PROVENANCE.md) for the contest boundary, prior-work
 disclosure, starter reuse, and AI-assistance statement.

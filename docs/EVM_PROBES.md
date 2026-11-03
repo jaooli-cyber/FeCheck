@@ -48,11 +48,14 @@ runner architecture.
 
 This probe suite alone does not establish the experimental scheduler, its
 stateful property/model adapter, deployment counter integration, or shrinking;
-that separate evidence lives in `tests/stateful-runner`. Neither suite claims a
-stateful capsule, stateful replay, fresh global EVM, cross-build address
-stability, AccountingLedger behavior, or production collision recovery.
-Addresses never enter logical failure identity. See
-[`STATEFUL_RUNNER.md`](STATEFUL_RUNNER.md) for the scheduler boundary.
+that separate evidence lives in `tests/stateful-runner`. Those two suites alone
+do not claim a stateful capsule, stateful replay, fresh global EVM, cross-build
+address stability, AccountingLedger behavior, or production collision
+recovery. The separate `tests/accounting-ledger` ingot supplies the concrete
+ledger evidence without extending those certification claims. Addresses never
+enter logical failure identity. See [`STATEFUL_RUNNER.md`](STATEFUL_RUNNER.md)
+for the scheduler boundary and [`ACCOUNTING_LEDGER.md`](ACCOUNTING_LEDGER.md)
+for the demo boundary.
 
 ## Reproduce
 
@@ -63,5 +66,6 @@ fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 ```
 
 The capability-probe ingot contains 9 tests, the root ingot contains 97, and
-the separate stateful-runner ingot contains 2, for 108 Fe tests in total. Keep
+the separate stateful-runner ingot contains 2. The AccountingLedger ingot adds
+14, for 122 Fe tests in total. Keep
 `--jobs 1` for predictable resource use while compiling embedded contracts.
