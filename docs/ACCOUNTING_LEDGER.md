@@ -1,13 +1,14 @@
 # AccountingLedger
 
 AccountingLedger is FeCheck's C6a state-machine demonstration. It exercises
-the experimental stateful action-sequence scheduler against a deliberately
-incorrect ledger, reduces the resulting accounting violation, and runs the
-same generated workload against a corrected implementation.
+the stateful action-sequence scheduler against a deliberately incorrect ledger,
+reduces the resulting accounting violation, runs the same generated workload
+against a corrected implementation, and performs a manifest-bound full-run
+recheck with fresh fixture identities.
 
 The demo is intentionally small: two actor contracts, deposits, transfers,
 three actions at most, and no external asset. Its purpose is to make the model,
-the EVM effects, and every shrink decision inspectable.
+the EVM effects, every shrink decision, and the replay evidence inspectable.
 
 ## Boundary
 
@@ -30,8 +31,13 @@ names the recipient proxy as its destination.
 Before every original or shrink evaluation, the adapter predicts all three
 CREATE2 addresses and checks that they contain no code. The evaluator then
 performs three typed deployments, verifies the predicted identities, bindings,
-code presence, role separation, and a zero initial snapshot. This protocol also
-applies to candidates that later return `Discard`.
+code presence, role separation, and a zero initial snapshot. Before checking
+bindings, state, or actions, the bound adapter observes all three
+`extcodehash` values and compares them with its trusted manifest. A mismatch is
+an infrastructure result with zero actions executed. This protocol also applies
+to candidates that later return `Discard`. Per-evaluation evidence also binds
+the actual ActorA and ActorB initcode hashes constructed with that fixture's
+target address.
 
 ## Packed action word
 
@@ -200,12 +206,85 @@ the namespace changes the run and fixture identities but not action generation.
 `tools/oracle_vectors.py` independently recomputes the scalar, sequence,
 generation, attempt, and four RNG-word hashes. It also simulates the packed
 decoder, pure model, buggy/fixed targets, current candidate order, trace, and
-counters. The Fe ingot supplies the end-to-end EVM evidence; neither side is
-used as the implementation of the other.
+counters, then derives 25 AccountingLedger vectors for the six semantic
+domains, adapter, bound-run, execution, capsule, and wire identities. These are
+in addition to the 32 pre-C6a vectors. The Fe ingot supplies the end-to-end EVM
+evidence; neither side is used as the implementation of the other.
+
+## Reproducible adapter manifest
+
+The specialized entry points do not accept a caller-selected variant, identity,
+preflight, or evaluator:
+
+```text
+check_accounting_ledger_buggy_bound_v1
+check_accounting_ledger_fixed_bound_v1
+recheck_accounting_ledger_buggy_bound_v1
+recheck_accounting_ledger_fixed_bound_v1
+```
+
+The trusted buggy and fixed identities commit to the action/model/snapshot/
+failure/fixture-policy schemas, adapter logic, source bundle, exact toolchain
+profile, target initcode/runtime, and actor template initcode/runtime. Buggy and
+fixed identities differ in both target initcode and target runtime. The actor
+template hash is `init_code_hash<LedgerActorProxy>((Address::zero(),))`; each
+fixture separately binds both actual
+`init_code_hash<LedgerActorProxy>((fixture.target,))` values.
+
+The source bundle covers exactly the normalized LF bytes of these four sorted
+paths:
+
+```text
+tests/accounting-ledger/src/action.fe
+tests/accounting-ledger/src/contracts.fe
+tests/accounting-ledger/src/harness.fe
+tests/accounting-ledger/src/model.fe
+```
+
+`manifest.fe` is deliberately excluded to avoid self-reference; `fe.toml` is
+also outside this source bundle. The canonical preimage contains the domain,
+file count, and each one-based index, relative POSIX path, byte length, and
+untrimmed content. `tools/adapter_manifest.py` recomputes its Keccak-256 and
+SHA-256 pins, executes and hashes the actual Fe binary, and verifies Fe 26.5.0
+(`3dab95f`). Its descriptor also verifies the CI-declared policy of Sonatina,
+profile `test`, and O1; it does not inspect a compiled artifact to infer those
+settings.
+
+The same verifier derives six semantic IDs from the exact raw ASCII domains for
+action encoding, model, fixture policy, failure schema, snapshot schema, and
+adapter logic. Any character change, including a trailing NUL, changes the ID.
+
+## Bound run and full replay
+
+The buggy run records semantic namespace `1`. Its adapter fingerprint and
+fixture policy produce a bound-run fingerprint; the original execution
+fingerprint supplies its fixture-salt domain. The capsule contains the same
+`[2,17,25]` original, `[1,17]` reduced witness, stable failure key, and exact
+`22/66/21` evaluation/deployment/action accounting plus the `18/2/8/8/0`
+shrink counters.
+
+The canonical capsule round-trips through an exact 1,152-byte raw wire. Its
+36th word is the Keccak-256 digest of the preceding 35 words, excluding itself.
+This is unauthenticated self-consistency, not a signature: anyone able to change
+the payload can recompute the digest.
+
+Replay namespace `3` is distinct from the recorded namespace. It changes only
+the replay execution fingerprint and fixture salts; the original `RunConfig`,
+semantic namespace, generation, and candidate digests remain unchanged. The
+test proves that original and replay Target/ActorA/ActorB addresses differ,
+that replay destinations have no code before replay and code afterwards, and
+that exactly attempts `0..3` execute, followed by the historical failure's
+shrink path; no later attempt executes. The complete prefix, failure, statistics,
+digests, and status match exactly. The fixed identity rejects the buggy capsule
+before callbacks. Repeating suite `LEDGER_SUITE_ID_V1` with the same replay
+namespace and returned replay registry is also rejected before deployment; the
+registry key is `(suite_id, replay_namespace)`.
 
 ## Honest claim boundary
 
-This is an experimental demonstration, not a certified stateful result.
+This is a manifest-bound, verified full-run replay of this concrete audited
+adapter. It is not a type-level certification of arbitrary stateful callbacks
+and not a production-security proof.
 
 - `[1,17]` is `CompleteLocal` under the current shrink order, not a global
   minimum.
@@ -219,17 +298,17 @@ This is an experimental demonstration, not a certified stateful result.
 - Direct typed CREATE2 failure still escapes the structured runner boundary.
 - The scheduler accounts for three deployments when the callback returns; Fe's
   type system does not prove that the callback honored that obligation.
-- Current run fingerprints do not bind target bytecode, proxy bytecode, the
-  decoder, the model, or fixture policy.
-- There is no stateful capsule, certified replay, external serialization, or
-  cross-build address guarantee in this slice.
+- The specialized wrapper checks its concrete runtimes and binds the source and
+  build, but the generic callback can still lie consistently about external
+  effects.
+- The capsule digest provides unauthenticated self-consistency, not signature,
+  authorship, or authority. Trust comes from the expected local manifest.
+- The run and replay registries are caller-owned and resettable; neither is a
+  global EVM uniqueness registry.
+- A new execution identity deliberately changes fixture addresses. No
+  cross-build address-stability guarantee is made.
 - The ledger has no asset, authorization policy, reentrancy surface, or
   production-security claim.
-
-A future stateful replay boundary must authenticate the action encoding,
-model/property version, failure schema, adapter and bytecode identities,
-snapshot schema, fixture policy, and full run configuration. It must also use a
-fresh replay identity in a fresh outer invocation.
 
 See [STATEFUL_RUNNER.md](STATEFUL_RUNNER.md) for the callback protocol and its
 general limitations.
@@ -241,4 +320,11 @@ fe fmt --check tests/accounting-ledger
 fe check tests/accounting-ledger --profile dev
 fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
 python tools/oracle_vectors.py
+python -m unittest tools/test_adapter_manifest.py
+python tools/adapter_manifest.py \
+  --check \
+  --fe "$(command -v fe)" \
+  --backend sonatina \
+  --profile test \
+  --opt 1
 ```

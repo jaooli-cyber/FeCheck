@@ -162,7 +162,7 @@ attempt index, local evaluation index, and role tag. Its preimage is 754 bytes.
 V1 role tags are Target = 1, ActorA = 2, and ActorB = 3.
 
 `tools/oracle_vectors.py` independently constructs every byte, prints each
-preimage, and verifies 32 Keccak goldens with PyCryptodome 3.23.0. They cover
+preimage, and verifies Keccak goldens with PyCryptodome 3.23.0. They cover
 Bool strategy identities, the scalar seeded full-domain RNG branch, ActionSeq
 logical encoding and dynamic value encoding, zero/one/full edge configurations,
 the complete seed-plus-four-word random sequence chain, a sequence run
@@ -243,18 +243,18 @@ certification boundary.
 
 ## Stateful identity and admission foundation
 
-The implemented stateful foundation does not execute EVM properties. It defines
-a fixed deployment plan, a complete logical evaluation context, the canonical
-fixture salt above, and ingot-internal admission primitives that check both
-state-evaluation and deployment capacity before committing any work. A rejected
-admission returns the input statistics unchanged. An accepted admission
-increments only `fixture_evaluations` and returns the required deployment
-count. That count is
-not a persistent reservation. Before another admission, the scheduler must
-complete and account for the admitted fixture; inconsistent prior
-`fixture_evaluations` and `contract_deployments` are rejected. Attempts,
-property evaluations, deployments, actions, and shrink counters are the
-responsibility of the experimental scheduler and fixture executor.
+The contract-free root foundation does not itself execute EVM properties. It
+defines a fixed deployment plan, a complete logical evaluation context, the
+canonical fixture salt above, and ingot-internal admission primitives that
+check both state-evaluation and deployment capacity before committing any work.
+A rejected admission returns the input statistics unchanged. An accepted
+admission increments only `fixture_evaluations` and returns the required
+deployment count. That count is not a persistent reservation. Before another
+admission, the scheduler must complete and account for the admitted fixture;
+inconsistent prior `fixture_evaluations` and `contract_deployments` are
+rejected. Attempts, property evaluations, deployments, actions, and shrink
+counters are the responsibility of the stateful scheduler and fixture
+executor.
 
 These low-level primitives require the scheduler to validate the global
 RunConfig, codec, and caps first; they are not a public certified boundary.
@@ -272,7 +272,8 @@ namespace guarantee.
 
 The foundation itself performs no CREATE2 deployment, proxy call, or model
 execution. The separate experimental runner composes it with consumer-defined
-callbacks; no stateful capsule or replay is claimed.
+callbacks. The manifest-bound layer described below verifies receipts and a
+full-run replay but still delegates EVM effects to those callbacks.
 
 ## Experimental stateful ActionSeq runner
 
@@ -332,11 +333,126 @@ other uncaught deployment failure reverts the outer evaluation and returns no
 `RunOutcome`. A zero-code preflight observation does not exclude nonce,
 constructor, or resource failures.
 
-The current run and fixture fingerprints do not bind adapter bytecode, model,
-fixture policy, or a stateful certificate format. The experimental result is
-therefore not a stateful replay certificate, not a cross-build address
-guarantee, and not a global uniqueness proof. See `docs/STATEFUL_RUNNER.md` for
-the complete protocol and executable evidence boundary.
+The experimental result alone is not a stateful replay certificate, a
+cross-build address guarantee, or a global uniqueness proof. See
+`docs/STATEFUL_RUNNER.md` for the complete protocol and evidence boundary.
+
+## Manifest-bound stateful full-run recheck
+
+`StatefulAdapterIdentityV1` contains the identity version, root protocol and P0
+fixture-plan fingerprints, concrete fixture policy, action/model/snapshot/
+failure/adapter fingerprints, target initcode/runtime, actor-template
+initcode/runtime, source bundle, and toolchain fingerprint. The actor identity
+field is an initcode template hash (AccountingLedger uses `Address::zero()`);
+concrete fixture evidence carries the two actor initcode hashes instantiated
+with the real target. Its canonical adapter fingerprint hashes these fixed
+words under the stateful-adapter domain. The expected identity is a trusted
+local input; capsule contents never select their own authority.
+
+AccountingLedger derives six semantic fingerprints as Keccak-256 of the exact
+raw ASCII domains for action encoding, model, fixture policy, failure schema,
+snapshot schema, and adapter logic. `adapter_manifest.py` and the independent
+oracle verify those bytes; no padding, trailing NUL, or normalized alias is
+accepted.
+
+For a strategy and `RunConfig`, the semantic identities are:
+
+```text
+ordinary_run = canonical pure run fingerprint
+bound_run    = H(STATEFUL-RUN/V1,
+                 ordinary_run,
+                 adapter_fingerprint,
+                 fixture_policy_fingerprint)
+```
+
+The original execution identity is
+`H(EXEC-ORIGINAL/V1, bound_run, recorded_namespace)`. Generation continues to
+use the ordinary strategy/generation identity and the original `RunConfig`.
+The execution identity is carried separately as the fixture-salt domain.
+
+Every `StatefulBoundEvaluationReceipt` binds the adapter, bound run, execution
+fingerprint, suite, semantic and execution namespaces, master seed, attempt and
+local evaluation indices, canonical candidate digest, fixture evidence,
+verdict, failure/error fields, and actions executed. Concrete fixture evidence
+may additionally bind per-evaluation addresses, initcode, and observed runtime
+hashes. The ingot-level verifier recomputes this binding before exposing the
+ordinary receipt to scheduler accounting. This detects mismatched or stale
+receipts, not a callback that fabricates a self-consistent receipt.
+
+A falsified bound run emits a `StatefulBoundReplayCapsuleV1`. Its payload words
+are, in order:
+
+```text
+ 0 domain/magic
+ 1 word count (36)
+ 2 format version
+ 3 generation algorithm version
+ 4 edge-policy version
+ 5 protocol fingerprint
+ 6 fixture-policy fingerprint
+ 7 sequence capacity
+ 8 suite ID
+ 9 recorded semantic namespace
+10 master seed
+11 falsifying attempt index
+12 attempt identity
+13 generation fingerprint
+14 ordinary run fingerprint
+15 bound run fingerprint
+16 adapter fingerprint
+17 failure kind
+18 failure detail
+19 flags
+20 original digest
+21 reduced digest
+22..28 seven RunStats fields
+29..33 five ShrinkStats fields
+34 shrink-status tag
+35 capsule digest
+```
+
+The digest is `Keccak256` of words `0..34`; it excludes word 35. The external
+wire is exactly 36 big-endian words / 1,152 bytes. Decoding rejects non-exact
+length, invalid magic, word count, versions, flags, status tags, out-of-range
+capacity, or digest; recheck requires exact local capacity. These stateful
+domain hashes are direct fixed-word Keccak preimages;
+they are intentionally distinct from the tagged length-prefixed codec scheme
+described for strategy/run fingerprints above. The digest supplies only
+unauthenticated integrity/self-consistency: anyone able to alter the payload can
+recompute it. It is not a signature, origin, or authorship proof.
+
+Recheck first validates the trusted identity, capsule digest and fields,
+strategy/config/generation/bound identities, attempt identity, regenerated
+original digest, and overflow-safe structural statistics. This is completed
+before callbacks. The replay namespace must differ from the recorded namespace;
+its execution fingerprint is:
+
+```text
+H(EXEC-REPLAY/V1, bound_run, capsule_digest, replay_namespace)
+```
+
+The original `RunConfig` and semantic namespace are not rewritten. The new
+execution identity affects fixture salts and the replay registry only. Recheck
+then executes exactly attempts `0..capsule.attempt_index` on a non-divergent
+prefix, including the historical falsifying attempt, followed by its complete
+shrink path. A terminal earlier failure or infrastructure divergence stops at
+that point for mismatch/error classification; no path executes a later attempt.
+`Reproduced` requires the same failure key, original/reduced digests, all seven
+run counters, all five shrink counters, and
+shrink status.
+
+`StatefulReplayRegistry` is independent from `StatefulRunRegistry`, bounded to
+eight caller-owned entries, and keyed by `(suite_id, replay_namespace)`.
+A proposed claim is adopted only after the first `Ready` preflight, so an early
+validation/admission/preflight failure preserves the input registry. Resetting
+or replacing either registry resets its knowledge; neither proves global EVM
+uniqueness.
+
+The generic layer remains verified rather than certified: Fe cannot prove the
+effectful callback protocol. AccountingLedger supplies a specialized wrapper
+that fixes the expected manifest, observes target and both proxy runtime hashes
+before actions, and binds those hashes, three addresses, and both concrete
+actor initcode hashes into fixture evidence.
 
 ## Test-only EVM capability evidence
 
@@ -373,11 +489,12 @@ ingot contains the five contracts used for this evidence.
 
 These probes alone do not establish the experimental scheduler, its property
 adapter, model, deployment/action statistics, or shrinking; that separate
-integration evidence lives in `tests/stateful-runner`. Neither suite establishes
-a stateful capsule, replay, fresh global EVM, or cross-build address stability.
-Concrete addresses are test observations only and are not part of a failure
-key or capsule. See `docs/EVM_PROBES.md` and `docs/STATEFUL_RUNNER.md` for the
-two evidence boundaries.
+integration evidence lives in `tests/stateful-runner`. Neither probe suite alone
+establishes the manifest-bound capsule/recheck, fresh global EVM, or cross-build
+address stability. That replay evidence lives in the root tests and the
+specialized AccountingLedger ingot. Concrete addresses are fixture evidence,
+not logical failure identity or capsule fields. See `docs/EVM_PROBES.md` and
+`docs/STATEFUL_RUNNER.md` for the evidence boundaries.
 
 ## Action sequence boundary
 
@@ -470,7 +587,7 @@ distinct capsule binds all sequence strategy and run identity described above,
 and replay checks the original canonical digest before property evaluation,
 then reproduces the exact failure-key-preserving shrink evidence. Stateful
 evaluation additionally creates a fresh fixture and model for every evaluated
-original or candidate through the experimental callback boundary. The scheduler,
-fixed deployment accounting, action receipts, and isolated EVM golden are
-implemented. Stateful capsules, replay, and type-level proof of the adapter
-protocol are not claimed.
+original or candidate through the callback boundary. The manifest-bound
+stateful layer emits a canonical capsule and verifies an exact full-run recheck
+under fresh execution identity. Type-level proof of arbitrary adapter effects
+is not claimed.

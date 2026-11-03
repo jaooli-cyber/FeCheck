@@ -1,0 +1,1338 @@
+use super::action_seq::{
+    ActionSeq,
+    MAX_ACTION_SEQ_CAPACITY_V1,
+    U256ActionSeqStrategy,
+    generate_u256_action_seq_attempt,
+    u256_action_seq_digest,
+    u256_action_seq_fingerprint,
+    u256_action_seq_validate,
+}
+use super::codec::action_seq_u256_codec_fingerprint
+use super::outcome::{
+    ErrorCode,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::pure_runner::{empty_run_stats, validate_run_config_for_codec}
+use super::replay::{
+    GENERATION_ALGORITHM_VERSION_V1,
+    GENERATION_EDGE_POLICY_VERSION_V1,
+    RunConfig,
+    attempt_seed,
+    generation_fingerprint,
+    run_fingerprint,
+}
+use super::stateful::{
+    STATEFUL_RUN_REGISTRY_CAPACITY_V1,
+    StatefulRunRegistry,
+    stateful_run_registry_empty,
+    stateful_run_registry_len,
+}
+use super::stateful_action_seq_runner::{
+    STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1,
+    StatefulActionSeqRequest,
+    StatefulActionSeqRunReport,
+    StatefulEvaluationReceipt,
+    StatefulEvaluationVerificationRequest,
+    StatefulFixturePreflight,
+    StatefulFixtureRequest,
+    check_u256_action_seq_stateful_with_execution,
+}
+use super::strategy::GenerationResult
+use std::abi::{Bytes, bytes_from_words}
+use std::evm::keccak_words
+
+pub const STATEFUL_ADAPTER_IDENTITY_VERSION_V1: u256 = 1
+pub const STATEFUL_BOUND_CAPSULE_FORMAT_VERSION_V1: u256 = 1
+pub const STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1: usize = 35
+pub const STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1: usize = 36
+pub const STATEFUL_BOUND_CAPSULE_BYTE_COUNT_V1: usize = 1152
+pub const STATEFUL_BOUND_CAPSULE_FLAGS_V1: u256 = 0
+
+const DOMAIN_STATEFUL_ADAPTER_V1: u256 = 0x4645434845434b2f535441544546554c2d414441505445522f56310000000000
+const DOMAIN_STATEFUL_PROTOCOL_V1: u256 = 0x4645434845434b2f535441544546554c2d50524f544f434f4c2f563100000000
+const DOMAIN_STATEFUL_FIXTURE_PLAN_V1: u256 = 0x4645434845434b2f535441544546554c2d464958545552452f56310000000000
+const DOMAIN_STATEFUL_RUN_V1: u256 = 0x4645434845434b2f535441544546554c2d52554e2f5631000000000000000000
+const DOMAIN_EXEC_ORIGINAL_V1: u256 = 0x4645434845434b2f455845432d4f524947494e414c2f56310000000000000000
+const DOMAIN_EXEC_REPLAY_V1: u256 = 0x4645434845434b2f455845432d5245504c41592f563100000000000000000000
+const DOMAIN_STATEFUL_FIXTURE_EVIDENCE_V1: u256 = 0x4645434845434b2f535441544546554c2d45564944454e43452f563100000000
+const DOMAIN_STATEFUL_BINDING_V1: u256 = 0x4645434845434b2f535441544546554c2d42494e44494e472f56310000000000
+const DOMAIN_STATEFUL_CAPSULE_V1: u256 = 0x4645434845434b2f535441544546554c2f43415053554c452f56310000000000
+
+pub const ERROR_STATEFUL_IDENTITY_VERSION: u256 = 520
+pub const ERROR_STATEFUL_ADAPTER_MISMATCH: u256 = 521
+pub const ERROR_STATEFUL_PROTOCOL_MISMATCH: u256 = 522
+pub const ERROR_STATEFUL_FIXTURE_POLICY_MISMATCH: u256 = 523
+pub const ERROR_STATEFUL_BOUND_RUN_MISMATCH: u256 = 524
+pub const ERROR_STATEFUL_EXECUTION_NAMESPACE_REUSED: u256 = 525
+pub const ERROR_STATEFUL_BOUND_RECEIPT_ADAPTER: u256 = 526
+pub const ERROR_STATEFUL_BOUND_RECEIPT_FIXTURE: u256 = 527
+pub const ERROR_STATEFUL_BOUND_RECEIPT_BINDING: u256 = 528
+pub const ERROR_STATEFUL_BOUND_CANDIDATE_DIGEST: u256 = 529
+pub const ERROR_STATEFUL_BOUND_CAPSULE_MAGIC: u256 = 530
+pub const ERROR_STATEFUL_BOUND_CAPSULE_WORD_COUNT: u256 = 531
+pub const ERROR_STATEFUL_BOUND_CAPSULE_FORMAT: u256 = 532
+pub const ERROR_STATEFUL_BOUND_CAPSULE_CAPACITY: u256 = 533
+pub const ERROR_STATEFUL_BOUND_CAPSULE_FLAGS: u256 = 534
+pub const ERROR_STATEFUL_BOUND_CAPSULE_STATUS: u256 = 535
+pub const ERROR_STATEFUL_BOUND_CAPSULE_ALGORITHM: u256 = 536
+pub const ERROR_STATEFUL_BOUND_CAPSULE_EDGE_POLICY: u256 = 537
+pub const ERROR_STATEFUL_BOUND_CAPSULE_SUITE: u256 = 538
+pub const ERROR_STATEFUL_BOUND_CAPSULE_NAMESPACE: u256 = 539
+pub const ERROR_STATEFUL_REPLAY_DUPLICATE: u256 = 540
+pub const ERROR_STATEFUL_REPLAY_REGISTRY_FULL: u256 = 541
+pub const ERROR_STATEFUL_BOUND_GENERATION: u256 = 542
+pub const ERROR_STATEFUL_BOUND_ORDINARY_RUN: u256 = 543
+pub const ERROR_STATEFUL_BOUND_ATTEMPT_IDENTITY: u256 = 544
+pub const ERROR_STATEFUL_BOUND_STATS: u256 = 545
+pub const ERROR_STATEFUL_BOUND_ORIGINAL_DIGEST: u256 = 546
+pub const ERROR_STATEFUL_BOUND_CAPSULE_DIGEST: u256 = 547
+pub const ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH: u256 = 548
+pub const ERROR_STATEFUL_FIXTURE_PLAN_MISMATCH: u256 = 549
+
+pub const STATEFUL_EVIDENCE_FAILURE: u256 = 1
+pub const STATEFUL_EVIDENCE_RUN_STATS: u256 = 2
+pub const STATEFUL_EVIDENCE_SHRINK_STATS: u256 = 3
+pub const STATEFUL_EVIDENCE_SHRINK_STATUS: u256 = 4
+pub const STATEFUL_EVIDENCE_ORIGINAL_DIGEST: u256 = 5
+pub const STATEFUL_EVIDENCE_REDUCED_DIGEST: u256 = 6
+
+/// Trusted, caller-supplied description of one stateful adapter build.
+///
+/// The generic boundary verifies this manifest and binds it into every
+/// receipt and capsule. It does not prove that an effectful callback tells
+/// the truth about the external system.
+pub struct StatefulAdapterIdentityV1 {
+    pub identity_version: u256,
+    pub protocol_fingerprint: u256,
+    pub fixture_plan_fingerprint: u256,
+    pub fixture_policy_fingerprint: u256,
+    pub action_encoding_fingerprint: u256,
+    pub model_fingerprint: u256,
+    pub snapshot_schema_fingerprint: u256,
+    pub failure_schema_fingerprint: u256,
+    pub adapter_logic_fingerprint: u256,
+    pub target_init_code_hash: u256,
+    pub actor_init_code_template_hash: u256,
+    pub target_runtime_code_hash: u256,
+    pub actor_runtime_code_hash: u256,
+    pub source_bundle_fingerprint: u256,
+    pub toolchain_fingerprint: u256,
+}
+
+impl Copy for StatefulAdapterIdentityV1 {}
+
+pub fn stateful_protocol_fingerprint_v1() -> u256 {
+    keccak_words([DOMAIN_STATEFUL_PROTOCOL_V1, 1])
+}
+
+pub fn stateful_p0_fixture_plan_fingerprint_v1() -> u256 {
+    keccak_words(
+        [DOMAIN_STATEFUL_FIXTURE_PLAN_V1, STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1],
+    )
+}
+
+pub fn stateful_adapter_fingerprint_v1(_ identity: StatefulAdapterIdentityV1) -> u256 {
+    keccak_words(
+        [
+            DOMAIN_STATEFUL_ADAPTER_V1,
+            identity.identity_version,
+            identity.protocol_fingerprint,
+            identity.fixture_plan_fingerprint,
+            identity.fixture_policy_fingerprint,
+            identity.action_encoding_fingerprint,
+            identity.model_fingerprint,
+            identity.snapshot_schema_fingerprint,
+            identity.failure_schema_fingerprint,
+            identity.adapter_logic_fingerprint,
+            identity.target_init_code_hash,
+            identity.actor_init_code_template_hash,
+            identity.target_runtime_code_hash,
+            identity.actor_runtime_code_hash,
+            identity.source_bundle_fingerprint,
+            identity.toolchain_fingerprint,
+        ],
+    )
+}
+
+pub fn stateful_bound_run_fingerprint_v1(
+    _ ordinary_run_fingerprint: u256,
+    _ adapter_fingerprint: u256,
+    _ fixture_policy_fingerprint: u256,
+) -> u256 {
+    keccak_words(
+        [
+            DOMAIN_STATEFUL_RUN_V1,
+            ordinary_run_fingerprint,
+            adapter_fingerprint,
+            fixture_policy_fingerprint,
+        ],
+    )
+}
+
+pub fn stateful_original_execution_fingerprint_v1(
+    _ bound_run_fingerprint: u256,
+    _ recorded_namespace: u256,
+) -> u256 {
+    keccak_words(
+        [DOMAIN_EXEC_ORIGINAL_V1, bound_run_fingerprint, recorded_namespace],
+    )
+}
+
+pub fn stateful_replay_execution_fingerprint_v1(
+    _ bound_run_fingerprint: u256,
+    _ capsule_digest: u256,
+    _ replay_namespace: u256,
+) -> u256 {
+    keccak_words(
+        [DOMAIN_EXEC_REPLAY_V1, bound_run_fingerprint, capsule_digest, replay_namespace],
+    )
+}
+
+/// Evidence asserted by one concrete callback after deploying and observing
+/// its fresh fixture. Specialized adapters must compare all observed runtime
+/// hashes to their trusted manifest before constructing this value.
+pub fn stateful_fixture_evidence_fingerprint_v1(
+    _ identity: StatefulAdapterIdentityV1,
+    _ target_address: u256,
+    _ actor_a_address: u256,
+    _ actor_b_address: u256,
+    _ actor_a_init_code_hash: u256,
+    _ actor_b_init_code_hash: u256,
+    _ observed_target_runtime_hash: u256,
+    _ observed_actor_a_runtime_hash: u256,
+    _ observed_actor_b_runtime_hash: u256,
+) -> u256 {
+    keccak_words(
+        [
+            DOMAIN_STATEFUL_FIXTURE_EVIDENCE_V1,
+            stateful_adapter_fingerprint_v1(identity),
+            target_address,
+            actor_a_address,
+            actor_b_address,
+            actor_a_init_code_hash,
+            actor_b_init_code_hash,
+            observed_target_runtime_hash,
+            observed_actor_a_runtime_hash,
+            observed_actor_b_runtime_hash,
+        ],
+    )
+}
+
+fn validate_stateful_adapter_identity_v1(_ identity: StatefulAdapterIdentityV1) -> Option<
+    ErrorCode,
+> {
+    if identity.identity_version != STATEFUL_ADAPTER_IDENTITY_VERSION_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_STATEFUL_IDENTITY_VERSION, detail: identity.identity_version },
+        )
+    }
+    let expected_protocol = stateful_protocol_fingerprint_v1()
+    if identity.protocol_fingerprint != expected_protocol {
+        return Option::Some(
+            ErrorCode {
+                kind: ERROR_STATEFUL_PROTOCOL_MISMATCH,
+                detail: identity.protocol_fingerprint,
+            },
+        )
+    }
+    let expected_fixture = stateful_p0_fixture_plan_fingerprint_v1()
+    if identity.fixture_plan_fingerprint != expected_fixture {
+        return Option::Some(
+            ErrorCode {
+                kind: ERROR_STATEFUL_FIXTURE_PLAN_MISMATCH,
+                detail: identity.fixture_plan_fingerprint,
+            },
+        )
+    }
+    Option::None
+}
+
+pub struct StatefulBoundEvaluationReceipt {
+    pub verdict: PropertyVerdict,
+    pub actions_executed: u256,
+    pub adapter_fingerprint: u256,
+    pub fixture_evidence_fingerprint: u256,
+    pub binding_fingerprint: u256,
+}
+
+impl Copy for StatefulBoundEvaluationReceipt {}
+
+fn verdict_evidence(_ verdict: PropertyVerdict) -> [u256; 3] {
+    match verdict {
+        PropertyVerdict::Pass => [0, 0, 0],
+        PropertyVerdict::Discard => [1, 0, 0],
+        PropertyVerdict::Fail(failure) => [2, failure.kind, failure.detail],
+        PropertyVerdict::InfrastructureError(error) => [3, error.kind, error.detail],
+    }
+}
+
+pub fn stateful_bound_binding_fingerprint_v1<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ request: StatefulActionSeqRequest<N>,
+    _ adapter_fingerprint: u256,
+    _ fixture_evidence_fingerprint: u256,
+    _ verdict: PropertyVerdict,
+    _ actions_executed: u256,
+) -> Result<ErrorCode, u256> {
+    let candidate_digest = match u256_action_seq_digest(strategy, request.value) {
+        Result::Ok(digest) => digest,
+        Result::Err(error) => {
+            return Result::Err(
+                ErrorCode { kind: ERROR_STATEFUL_BOUND_CANDIDATE_DIGEST, detail: error.kind },
+            )
+        },
+    }
+    let verdict_fields = verdict_evidence(verdict)
+    Result::Ok(
+        keccak_words(
+            [
+                DOMAIN_STATEFUL_BINDING_V1,
+                adapter_fingerprint,
+                request.context.run_fingerprint,
+                request.context.fixture_domain,
+                request.context.suite_id,
+                request.context.run_namespace,
+                request.context.execution_namespace,
+                request.context.master_seed,
+                request.context.attempt_index,
+                request.context.local_evaluation_index,
+                candidate_digest,
+                fixture_evidence_fingerprint,
+                verdict_fields[0],
+                verdict_fields[1],
+                verdict_fields[2],
+                actions_executed,
+            ],
+        ),
+    )
+}
+
+pub fn stateful_bound_receipt_v1<const N: usize>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ request: StatefulActionSeqRequest<N>,
+    _ adapter_fingerprint: u256,
+    _ fixture_evidence_fingerprint: u256,
+    _ verdict: PropertyVerdict,
+    _ actions_executed: u256,
+) -> Result<ErrorCode, StatefulBoundEvaluationReceipt> {
+    match stateful_bound_binding_fingerprint_v1(
+        strategy,
+        request,
+        adapter_fingerprint,
+        fixture_evidence_fingerprint,
+        verdict,
+        actions_executed,
+    ) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(binding_fingerprint) => {
+            Result::Ok(
+                StatefulBoundEvaluationReceipt {
+                    verdict,
+                    actions_executed,
+                    adapter_fingerprint,
+                    fixture_evidence_fingerprint,
+                    binding_fingerprint,
+                },
+            )
+        },
+    }
+}
+
+struct StatefulBoundVerifier<const N: usize> {
+    strategy: U256ActionSeqStrategy<N>,
+    adapter_fingerprint: u256,
+}
+
+impl<const N: usize> Copy for StatefulBoundVerifier<N> {}
+
+impl<const N: usize> Fn(StatefulEvaluationVerificationRequest<
+    N,
+    StatefulBoundEvaluationReceipt,
+>) -> _ for StatefulBoundVerifier<N> {
+    uses E = ()
+    type Out = StatefulEvaluationReceipt
+
+    fn call(
+        self,
+        _ verification: StatefulEvaluationVerificationRequest<N, StatefulBoundEvaluationReceipt>,
+    ) -> StatefulEvaluationReceipt {
+        let request = verification.request
+        let receipt = verification.receipt
+        if receipt.adapter_fingerprint != self.adapter_fingerprint {
+            return StatefulEvaluationReceipt {
+                verdict: PropertyVerdict::InfrastructureError(
+                    ErrorCode {
+                        kind: ERROR_STATEFUL_BOUND_RECEIPT_ADAPTER,
+                        detail: receipt.adapter_fingerprint,
+                    },
+                ),
+                actions_executed: receipt.actions_executed,
+            }
+        }
+        let expected_binding = match stateful_bound_binding_fingerprint_v1(
+            self.strategy,
+            request,
+            self.adapter_fingerprint,
+            receipt.fixture_evidence_fingerprint,
+            receipt.verdict,
+            receipt.actions_executed,
+        ) {
+            Result::Ok(binding) => binding,
+            Result::Err(error) => {
+                return StatefulEvaluationReceipt {
+                    verdict: PropertyVerdict::InfrastructureError(error),
+                    actions_executed: receipt.actions_executed,
+                }
+            },
+        }
+        if receipt.binding_fingerprint != expected_binding {
+            return StatefulEvaluationReceipt {
+                verdict: PropertyVerdict::InfrastructureError(
+                    ErrorCode {
+                        kind: ERROR_STATEFUL_BOUND_RECEIPT_BINDING,
+                        detail: receipt.binding_fingerprint,
+                    },
+                ),
+                actions_executed: receipt.actions_executed,
+            }
+        }
+        StatefulEvaluationReceipt {
+            verdict: receipt.verdict,
+            actions_executed: receipt.actions_executed,
+        }
+    }
+}
+
+pub struct StatefulBoundReplayCapsuleV1 {
+    pub format_version: u256,
+    pub algorithm_version: u256,
+    pub edge_policy_version: u256,
+    pub protocol_fingerprint: u256,
+    pub fixture_policy_fingerprint: u256,
+    pub capacity: u256,
+    pub suite_id: u256,
+    pub recorded_namespace: u256,
+    pub master_seed: u256,
+    pub attempt_index: u256,
+    pub attempt_identity: u256,
+    pub generation_fingerprint: u256,
+    pub ordinary_run_fingerprint: u256,
+    pub bound_run_fingerprint: u256,
+    pub adapter_fingerprint: u256,
+    pub failure_key: FailureKey,
+    pub flags: u256,
+    pub original_digest: u256,
+    pub reduced_digest: u256,
+    pub run_stats: RunStats,
+    pub shrink_stats: ShrinkStats,
+    pub shrink_status: ShrinkStatus,
+    pub capsule_digest: u256,
+}
+
+impl Copy for StatefulBoundReplayCapsuleV1 {}
+
+fn shrink_status_tag(_ status: ShrinkStatus) -> u256 {
+    match status {
+        ShrinkStatus::CompleteLocal => 0,
+        ShrinkStatus::PartialBudget => 1,
+    }
+}
+
+fn encode_stateful_bound_capsule_payload_v1(
+    _ capsule: StatefulBoundReplayCapsuleV1,
+) -> [u256; STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1] {
+    [
+        DOMAIN_STATEFUL_CAPSULE_V1,
+        STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 as u256,
+        capsule.format_version,
+        capsule.algorithm_version,
+        capsule.edge_policy_version,
+        capsule.protocol_fingerprint,
+        capsule.fixture_policy_fingerprint,
+        capsule.capacity,
+        capsule.suite_id,
+        capsule.recorded_namespace,
+        capsule.master_seed,
+        capsule.attempt_index,
+        capsule.attempt_identity,
+        capsule.generation_fingerprint,
+        capsule.ordinary_run_fingerprint,
+        capsule.bound_run_fingerprint,
+        capsule.adapter_fingerprint,
+        capsule.failure_key.kind,
+        capsule.failure_key.detail,
+        capsule.flags,
+        capsule.original_digest,
+        capsule.reduced_digest,
+        capsule.run_stats.attempts,
+        capsule.run_stats.valid_cases,
+        capsule.run_stats.discards,
+        capsule.run_stats.property_evaluations,
+        capsule.run_stats.fixture_evaluations,
+        capsule.run_stats.contract_deployments,
+        capsule.run_stats.actions_executed,
+        capsule.shrink_stats.evaluations,
+        capsule.shrink_stats.accepted,
+        capsule.shrink_stats.rejected_pass,
+        capsule.shrink_stats.rejected_discard,
+        capsule.shrink_stats.rejected_failure_key,
+        shrink_status_tag(capsule.shrink_status),
+    ]
+}
+
+pub fn encode_stateful_bound_capsule_v1(
+    _ capsule: StatefulBoundReplayCapsuleV1,
+) -> [u256; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1] {
+    let payload = encode_stateful_bound_capsule_payload_v1(capsule)
+    var words = [0; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1]
+    var index: usize = 0
+    while index < STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1 {
+        words[index] = payload[index]
+        index += 1
+    }
+    words[STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1] = capsule.capsule_digest
+    words
+}
+
+pub fn decode_stateful_bound_capsule_v1(
+    _ words: [u256; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1],
+) -> Result<ErrorCode, StatefulBoundReplayCapsuleV1> {
+    if words[0] != DOMAIN_STATEFUL_CAPSULE_V1 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_MAGIC, detail: words[0] },
+        )
+    }
+    if words[1] != STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 as u256 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_WORD_COUNT, detail: words[1] },
+        )
+    }
+    var payload = [0; STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1]
+    var payload_index: usize = 0
+    while payload_index < STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1 {
+        payload[payload_index] = words[payload_index]
+        payload_index += 1
+    }
+    let expected_digest = keccak_words(payload)
+    if words[STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1] != expected_digest {
+        return Result::Err(
+            ErrorCode {
+                kind: ERROR_STATEFUL_BOUND_CAPSULE_DIGEST,
+                detail: words[STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1],
+            },
+        )
+    }
+    if words[2] != STATEFUL_BOUND_CAPSULE_FORMAT_VERSION_V1 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_FORMAT, detail: words[2] },
+        )
+    }
+    if words[3] != GENERATION_ALGORITHM_VERSION_V1 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_ALGORITHM, detail: words[3] },
+        )
+    }
+    if words[4] != GENERATION_EDGE_POLICY_VERSION_V1 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_EDGE_POLICY, detail: words[4] },
+        )
+    }
+    if words[5] != stateful_protocol_fingerprint_v1() {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_PROTOCOL_MISMATCH, detail: words[5] },
+        )
+    }
+    if words[7] > MAX_ACTION_SEQ_CAPACITY_V1 as u256 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_CAPACITY, detail: words[7] },
+        )
+    }
+    if words[19] != STATEFUL_BOUND_CAPSULE_FLAGS_V1 {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_FLAGS, detail: words[19] },
+        )
+    }
+    let shrink_status = if words[34] == 0 {
+        ShrinkStatus::CompleteLocal
+    } else if words[34] == 1 {
+        ShrinkStatus::PartialBudget
+    } else {
+        return Result::Err(
+            ErrorCode { kind: ERROR_STATEFUL_BOUND_CAPSULE_STATUS, detail: words[34] },
+        )
+    }
+    Result::Ok(
+        StatefulBoundReplayCapsuleV1 {
+            format_version: words[2],
+            algorithm_version: words[3],
+            edge_policy_version: words[4],
+            protocol_fingerprint: words[5],
+            fixture_policy_fingerprint: words[6],
+            capacity: words[7],
+            suite_id: words[8],
+            recorded_namespace: words[9],
+            master_seed: words[10],
+            attempt_index: words[11],
+            attempt_identity: words[12],
+            generation_fingerprint: words[13],
+            ordinary_run_fingerprint: words[14],
+            bound_run_fingerprint: words[15],
+            adapter_fingerprint: words[16],
+            failure_key: FailureKey { kind: words[17], detail: words[18] },
+            flags: words[19],
+            original_digest: words[20],
+            reduced_digest: words[21],
+            run_stats: RunStats {
+                attempts: words[22],
+                valid_cases: words[23],
+                discards: words[24],
+                property_evaluations: words[25],
+                fixture_evaluations: words[26],
+                contract_deployments: words[27],
+                actions_executed: words[28],
+            },
+            shrink_stats: ShrinkStats {
+                evaluations: words[29],
+                accepted: words[30],
+                rejected_pass: words[31],
+                rejected_discard: words[32],
+                rejected_failure_key: words[33],
+            },
+            shrink_status,
+            capsule_digest: words[STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1],
+        },
+    )
+}
+
+/// Length-exact raw-byte decoder. Every word is a 32-byte big-endian value;
+/// truncation and trailing bytes are rejected before any word is read.
+pub fn decode_stateful_bound_capsule_bytes_v1(_ bytes: Bytes) -> Result<
+    ErrorCode,
+    StatefulBoundReplayCapsuleV1,
+> {
+    if bytes.len() != STATEFUL_BOUND_CAPSULE_BYTE_COUNT_V1 {
+        return Result::Err(
+            ErrorCode {
+                kind: ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH,
+                detail: bytes.len() as u256,
+            },
+        )
+    }
+    var words = [0; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1]
+    var index: usize = 0
+    while index < STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 {
+        words[index] = bytes.word_at(index * 32)
+        index += 1
+    }
+    decode_stateful_bound_capsule_v1(words)
+}
+
+/// Canonical big-endian raw wire corresponding exactly to the 36 fixed words.
+pub fn encode_stateful_bound_capsule_bytes_v1(_ capsule: StatefulBoundReplayCapsuleV1) -> Bytes {
+    bytes_from_words(encode_stateful_bound_capsule_v1(capsule))
+}
+
+pub fn stateful_bound_capsule_digest_v1(_ capsule: StatefulBoundReplayCapsuleV1) -> u256 {
+    keccak_words(encode_stateful_bound_capsule_payload_v1(capsule))
+}
+
+pub struct StatefulReplayRegistry {
+    suite_ids: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+    replay_namespaces: [u256; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+    len: usize,
+}
+
+impl Copy for StatefulReplayRegistry {}
+
+pub fn stateful_replay_registry_empty() -> StatefulReplayRegistry {
+    StatefulReplayRegistry {
+        suite_ids: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+        replay_namespaces: [0; STATEFUL_RUN_REGISTRY_CAPACITY_V1],
+        len: 0,
+    }
+}
+
+pub fn stateful_replay_registry_len(_ registry: StatefulReplayRegistry) -> usize {
+    registry.len
+}
+
+pub fn stateful_replay_registry_contains(
+    _ registry: StatefulReplayRegistry,
+    _ suite_id: u256,
+    _ replay_namespace: u256,
+) -> bool {
+    var index: usize = 0
+    while index < registry.len {
+        if registry.suite_ids[index] == suite_id
+            && registry.replay_namespaces[index] == replay_namespace {
+            return true
+        }
+        index += 1
+    }
+    false
+}
+
+pub enum StatefulReplayRegistryClaim {
+    Claimed {
+        pub registry: StatefulReplayRegistry,
+    },
+    Rejected {
+        pub error: ErrorCode,
+        pub registry: StatefulReplayRegistry,
+    },
+}
+
+impl Copy for StatefulReplayRegistryClaim {}
+
+pub fn stateful_replay_registry_claim(
+    _ registry: StatefulReplayRegistry,
+    _ suite_id: u256,
+    _ replay_namespace: u256,
+) -> StatefulReplayRegistryClaim {
+    if stateful_replay_registry_contains(registry, suite_id, replay_namespace) {
+        return StatefulReplayRegistryClaim::Rejected {
+            error: ErrorCode { kind: ERROR_STATEFUL_REPLAY_DUPLICATE, detail: replay_namespace },
+            registry,
+        }
+    }
+    if registry.len == STATEFUL_RUN_REGISTRY_CAPACITY_V1 {
+        return StatefulReplayRegistryClaim::Rejected {
+            error: ErrorCode {
+                kind: ERROR_STATEFUL_REPLAY_REGISTRY_FULL,
+                detail: registry.len as u256,
+            },
+            registry,
+        }
+    }
+    var claimed = registry
+    claimed.suite_ids[claimed.len] = suite_id
+    claimed.replay_namespaces[claimed.len] = replay_namespace
+    claimed.len += 1
+    StatefulReplayRegistryClaim::Claimed { registry: claimed }
+}
+
+/// Overflow-safe consistency checks for historical stateful evidence.
+pub fn validate_stateful_bound_stats_v1(
+    _ config: RunConfig,
+    _ max_actions: u256,
+    _ attempt_index: u256,
+    _ run: RunStats,
+    _ shrink: ShrinkStats,
+    _ shrink_status: ShrinkStatus,
+) -> Option<ErrorCode> {
+    if config.target_valid_cases == 0 {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 0 })
+    }
+    if run.attempts == 0 {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 1 })
+    }
+    if attempt_index != run.attempts - 1 {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 2 })
+    }
+    if run.valid_cases >= config.target_valid_cases || run.discards > config.max_discards {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 3 })
+    }
+    if run.attempts <= run.valid_cases
+        || run.attempts - run.valid_cases == 0
+        || run.attempts - run.valid_cases - 1 != run.discards {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 4 })
+    }
+    if shrink.evaluations > config.max_shrink_evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 5 })
+    }
+    match shrink_status {
+        ShrinkStatus::CompleteLocal => {},
+        ShrinkStatus::PartialBudget => {
+            if shrink.evaluations != config.max_shrink_evaluations {
+                return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 15 })
+            }
+        },
+    }
+    var remaining = shrink.evaluations
+    if shrink.accepted > remaining {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 6 })
+    }
+    remaining -= shrink.accepted
+    if shrink.rejected_pass > remaining {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 7 })
+    }
+    remaining -= shrink.rejected_pass
+    if shrink.rejected_discard > remaining {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 8 })
+    }
+    remaining -= shrink.rejected_discard
+    if shrink.rejected_failure_key != remaining {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 9 })
+    }
+    if run.property_evaluations < run.attempts
+        || run.property_evaluations - run.attempts != shrink.evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 10 })
+    }
+    if run.fixture_evaluations != run.property_evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 11 })
+    }
+    if run.contract_deployments % STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 != 0
+        || run.contract_deployments / STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1
+            != run.fixture_evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 12 })
+    }
+    if run.fixture_evaluations > config.max_state_evaluations
+        || run.contract_deployments > config.max_deployments {
+        return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 13 })
+    }
+    if run.actions_executed != 0 {
+        if max_actions == 0
+            || run.property_evaluations == 0
+            || (run.actions_executed - 1) / max_actions >= run.property_evaluations {
+            return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 14 })
+        }
+    }
+    Option::None
+}
+
+pub struct StatefulBoundActionSeqRunReport<const N: usize> {
+    pub outcome: RunOutcome<ActionSeq<u256, N>>,
+    pub capsule: Option<StatefulBoundReplayCapsuleV1>,
+    pub registry: StatefulRunRegistry,
+}
+
+impl<const N: usize> Copy for StatefulBoundActionSeqRunReport<N> {}
+
+fn bound_run_report<const N: usize>(
+    _ outcome: RunOutcome<ActionSeq<u256, N>>,
+    _ registry: StatefulRunRegistry,
+) -> StatefulBoundActionSeqRunReport<N> {
+    StatefulBoundActionSeqRunReport { outcome, capsule: Option::None, registry }
+}
+
+/// Executes a manifest-bound stateful run and emits a capsule only for a
+/// falsification. This is a declarative binding boundary, not certification
+/// of the effectful adapter.
+pub fn check_u256_action_seq_stateful_bound_v1<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulBoundEvaluationReceipt,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ registry: StatefulRunRegistry,
+    _ identity: StatefulAdapterIdentityV1,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulBoundActionSeqRunReport<N>
+uses (P::E, X::E)
+{
+    match validate_stateful_adapter_identity_v1(identity) {
+        Option::Some(error) => {
+            return bound_run_report(
+                RunOutcome::ConfigurationError { error, stats: empty_run_stats() },
+                registry,
+            )
+        },
+        Option::None => {},
+    }
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    let ordinary_run = run_fingerprint(generation, config)
+    let adapter = stateful_adapter_fingerprint_v1(identity)
+    let bound_run = stateful_bound_run_fingerprint_v1(
+        ordinary_run,
+        adapter,
+        identity.fixture_policy_fingerprint,
+    )
+    let original_execution = stateful_original_execution_fingerprint_v1(bound_run, config.namespace)
+    let verifier = StatefulBoundVerifier { strategy, adapter_fingerprint: adapter }
+    let report = check_u256_action_seq_stateful_with_execution(
+        strategy,
+        master_seed,
+        config,
+        registry,
+        bound_run,
+        original_execution,
+        config.namespace,
+        Option::None,
+        preflight,
+        evaluate,
+        verifier,
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            let original_digest = match u256_action_seq_digest(strategy, original) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return bound_run_report(
+                        RunOutcome::InfrastructureError { error, stats },
+                        report.registry,
+                    )
+                },
+            }
+            let reduced_digest = match u256_action_seq_digest(strategy, minimal) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return bound_run_report(
+                        RunOutcome::InfrastructureError { error, stats },
+                        report.registry,
+                    )
+                },
+            }
+            let attempt_index = stats.attempts - 1
+            var capsule = StatefulBoundReplayCapsuleV1 {
+                format_version: STATEFUL_BOUND_CAPSULE_FORMAT_VERSION_V1,
+                algorithm_version: GENERATION_ALGORITHM_VERSION_V1,
+                edge_policy_version: GENERATION_EDGE_POLICY_VERSION_V1,
+                protocol_fingerprint: identity.protocol_fingerprint,
+                fixture_policy_fingerprint: identity.fixture_policy_fingerprint,
+                capacity: N as u256,
+                suite_id: config.suite_id,
+                recorded_namespace: config.namespace,
+                master_seed,
+                attempt_index,
+                attempt_identity: attempt_seed(master_seed, attempt_index, generation),
+                generation_fingerprint: generation,
+                ordinary_run_fingerprint: ordinary_run,
+                bound_run_fingerprint: bound_run,
+                adapter_fingerprint: adapter,
+                failure_key: failure,
+                flags: STATEFUL_BOUND_CAPSULE_FLAGS_V1,
+                original_digest,
+                reduced_digest,
+                run_stats: stats,
+                shrink_stats: shrink,
+                shrink_status,
+                capsule_digest: 0,
+            }
+            capsule.capsule_digest = stateful_bound_capsule_digest_v1(capsule)
+            StatefulBoundActionSeqRunReport {
+                outcome: report.outcome,
+                capsule: Option::Some(capsule),
+                registry: report.registry,
+            }
+        },
+        _ => StatefulBoundActionSeqRunReport {
+            outcome: report.outcome,
+            capsule: Option::None,
+            registry: report.registry,
+        },
+    }
+}
+
+pub enum StatefulBoundRecheckOutcome<const N: usize> {
+    Incompatible { pub error: ErrorCode },
+    ConfigurationError { pub error: ErrorCode },
+    ReplayInfrastructureError {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+    },
+    FailureNotObserved,
+    EvidenceMismatch { pub field: u256 },
+    Reproduced {
+        pub original: ActionSeq<u256, N>,
+        pub minimal: ActionSeq<u256, N>,
+        pub stats: RunStats,
+        pub shrink: ShrinkStats,
+        pub shrink_status: ShrinkStatus,
+    },
+}
+
+impl<const N: usize> Copy for StatefulBoundRecheckOutcome<N> {}
+
+pub struct StatefulBoundRecheckReport<const N: usize> {
+    pub outcome: StatefulBoundRecheckOutcome<N>,
+    pub registry: StatefulReplayRegistry,
+}
+
+impl<const N: usize> Copy for StatefulBoundRecheckReport<N> {}
+
+fn recheck_incompatible<const N: usize>(
+    _ kind: u256,
+    _ detail: u256,
+    _ registry: StatefulReplayRegistry,
+) -> StatefulBoundRecheckReport<N> {
+    StatefulBoundRecheckReport {
+        outcome: StatefulBoundRecheckOutcome::Incompatible { error: ErrorCode { kind, detail } },
+        registry,
+    }
+}
+
+fn run_stats_equal(_ left: RunStats, _ right: RunStats) -> bool {
+    left.attempts == right.attempts
+        && left.valid_cases == right.valid_cases
+        && left.discards == right.discards
+        && left.property_evaluations == right.property_evaluations
+        && left.fixture_evaluations == right.fixture_evaluations
+        && left.contract_deployments == right.contract_deployments
+        && left.actions_executed == right.actions_executed
+}
+
+fn shrink_stats_equal(_ left: ShrinkStats, _ right: ShrinkStats) -> bool {
+    left.evaluations == right.evaluations
+        && left.accepted == right.accepted
+        && left.rejected_pass == right.rejected_pass
+        && left.rejected_discard == right.rejected_discard
+        && left.rejected_failure_key == right.rejected_failure_key
+}
+
+fn shrink_status_equal(_ left: ShrinkStatus, _ right: ShrinkStatus) -> bool {
+    shrink_status_tag(left) == shrink_status_tag(right)
+}
+
+/// Repeats the complete attempt prefix through the historical attempt in a
+/// fresh execution namespace, then compares every recorded statistic and
+/// digest. A terminal earlier divergence stops immediately and no later
+/// attempt is evaluated. The original RunConfig is never rewritten.
+pub fn recheck_u256_action_seq_stateful_bound_v1<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulBoundEvaluationReceipt,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ config: RunConfig,
+    _ capsule: StatefulBoundReplayCapsuleV1,
+    _ expected_identity: StatefulAdapterIdentityV1,
+    _ replay_namespace: u256,
+    _ registry: StatefulReplayRegistry,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulBoundRecheckReport<N>
+uses (P::E, X::E)
+{
+    match validate_stateful_adapter_identity_v1(expected_identity) {
+        Option::Some(error) => {
+            return recheck_incompatible(error.kind, error.detail, registry)
+        },
+        Option::None => {},
+    }
+    let expected_adapter = stateful_adapter_fingerprint_v1(expected_identity)
+    if capsule.adapter_fingerprint != expected_adapter {
+        return recheck_incompatible(
+            ERROR_STATEFUL_ADAPTER_MISMATCH,
+            capsule.adapter_fingerprint,
+            registry,
+        )
+    }
+    if capsule.format_version != STATEFUL_BOUND_CAPSULE_FORMAT_VERSION_V1 {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_FORMAT,
+            capsule.format_version,
+            registry,
+        )
+    }
+    if capsule.algorithm_version != GENERATION_ALGORITHM_VERSION_V1 {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_ALGORITHM,
+            capsule.algorithm_version,
+            registry,
+        )
+    }
+    if capsule.edge_policy_version != GENERATION_EDGE_POLICY_VERSION_V1 {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_EDGE_POLICY,
+            capsule.edge_policy_version,
+            registry,
+        )
+    }
+    if capsule.protocol_fingerprint != expected_identity.protocol_fingerprint {
+        return recheck_incompatible(
+            ERROR_STATEFUL_PROTOCOL_MISMATCH,
+            capsule.protocol_fingerprint,
+            registry,
+        )
+    }
+    if capsule.fixture_policy_fingerprint != expected_identity.fixture_policy_fingerprint {
+        return recheck_incompatible(
+            ERROR_STATEFUL_FIXTURE_POLICY_MISMATCH,
+            capsule.fixture_policy_fingerprint,
+            registry,
+        )
+    }
+    if capsule.capacity != N as u256 {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_CAPACITY,
+            capsule.capacity,
+            registry,
+        )
+    }
+    if capsule.flags != STATEFUL_BOUND_CAPSULE_FLAGS_V1 {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_FLAGS,
+            capsule.flags,
+            registry,
+        )
+    }
+    let computed_capsule_digest = stateful_bound_capsule_digest_v1(capsule)
+    if capsule.capsule_digest != computed_capsule_digest {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_DIGEST,
+            capsule.capsule_digest,
+            registry,
+        )
+    }
+    if replay_namespace == capsule.recorded_namespace {
+        return recheck_incompatible(
+            ERROR_STATEFUL_EXECUTION_NAMESPACE_REUSED,
+            replay_namespace,
+            registry,
+        )
+    }
+    match validate_run_config_for_codec(config, action_seq_u256_codec_fingerprint()) {
+        Option::Some(error) => {
+            return StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ConfigurationError { error },
+                registry,
+            }
+        },
+        Option::None => {},
+    }
+    match u256_action_seq_validate(strategy) {
+        Option::Some(error) => {
+            return StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ConfigurationError { error },
+                registry,
+            }
+        },
+        Option::None => {},
+    }
+    if capsule.suite_id != config.suite_id {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_SUITE,
+            capsule.suite_id,
+            registry,
+        )
+    }
+    if capsule.recorded_namespace != config.namespace {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_CAPSULE_NAMESPACE,
+            capsule.recorded_namespace,
+            registry,
+        )
+    }
+    let expected_generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    if capsule.generation_fingerprint != expected_generation {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_GENERATION,
+            capsule.generation_fingerprint,
+            registry,
+        )
+    }
+    let expected_ordinary = run_fingerprint(expected_generation, config)
+    if capsule.ordinary_run_fingerprint != expected_ordinary {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_ORDINARY_RUN,
+            capsule.ordinary_run_fingerprint,
+            registry,
+        )
+    }
+    let expected_bound = stateful_bound_run_fingerprint_v1(
+        expected_ordinary,
+        expected_adapter,
+        expected_identity.fixture_policy_fingerprint,
+    )
+    if capsule.bound_run_fingerprint != expected_bound {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_RUN_MISMATCH,
+            capsule.bound_run_fingerprint,
+            registry,
+        )
+    }
+    let expected_attempt = attempt_seed(
+        capsule.master_seed,
+        capsule.attempt_index,
+        expected_generation,
+    )
+    if capsule.attempt_identity != expected_attempt {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_ATTEMPT_IDENTITY,
+            capsule.attempt_identity,
+            registry,
+        )
+    }
+    match validate_stateful_bound_stats_v1(
+        config,
+        strategy.max_actions as u256,
+        capsule.attempt_index,
+        capsule.run_stats,
+        capsule.shrink_stats,
+        capsule.shrink_status,
+    ) {
+        Option::Some(error) => {
+            return recheck_incompatible(error.kind, error.detail, registry)
+        },
+        Option::None => {},
+    }
+    let regenerated = match generate_u256_action_seq_attempt(
+        strategy,
+        capsule.master_seed,
+        expected_generation,
+        capsule.attempt_index,
+    ) {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(error) => {
+            return StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ConfigurationError { error },
+                registry,
+            }
+        },
+    }
+    let regenerated_digest = match u256_action_seq_digest(strategy, regenerated) {
+        Result::Ok(digest) => digest,
+        Result::Err(error) => {
+            return StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ConfigurationError { error },
+                registry,
+            }
+        },
+    }
+    if capsule.original_digest != regenerated_digest {
+        return recheck_incompatible(
+            ERROR_STATEFUL_BOUND_ORIGINAL_DIGEST,
+            capsule.original_digest,
+            registry,
+        )
+    }
+
+    let capsule_digest = capsule.capsule_digest
+    let proposed_registry = match stateful_replay_registry_claim(
+        registry,
+        config.suite_id,
+        replay_namespace,
+    ) {
+        StatefulReplayRegistryClaim::Claimed { registry } => registry,
+        StatefulReplayRegistryClaim::Rejected { error, registry } => {
+            return recheck_incompatible(error.kind, error.detail, registry)
+        },
+    }
+    let replay_execution = stateful_replay_execution_fingerprint_v1(
+        expected_bound,
+        capsule_digest,
+        replay_namespace,
+    )
+    let verifier = StatefulBoundVerifier { strategy, adapter_fingerprint: expected_adapter }
+    let rerun: StatefulActionSeqRunReport<N> = check_u256_action_seq_stateful_with_execution(
+        strategy,
+        capsule.master_seed,
+        config,
+        stateful_run_registry_empty(),
+        expected_bound,
+        replay_execution,
+        replay_namespace,
+        Option::Some(capsule.attempt_index),
+        preflight,
+        evaluate,
+        verifier,
+    )
+    let active_registry = if stateful_run_registry_len(rerun.registry) == 0 {
+        registry
+    } else {
+        proposed_registry
+    }
+    match rerun.outcome {
+        RunOutcome::ConfigurationError { error, stats: _ } => {
+            StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ConfigurationError { error },
+                registry: active_registry,
+            }
+        },
+        RunOutcome::InfrastructureError { error, stats } => {
+            StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::ReplayInfrastructureError { error, stats },
+                registry: active_registry,
+            }
+        },
+        RunOutcome::Passed { stats: _ } | RunOutcome::Exhausted { reason: _, stats: _ } => {
+            StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::FailureNotObserved,
+                registry: active_registry,
+            }
+        },
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            if !failure_key_equal(failure, capsule.failure_key) {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_FAILURE,
+                    },
+                    registry: active_registry,
+                }
+            }
+            if !run_stats_equal(stats, capsule.run_stats) {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_RUN_STATS,
+                    },
+                    registry: active_registry,
+                }
+            }
+            if !shrink_stats_equal(shrink, capsule.shrink_stats) {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_SHRINK_STATS,
+                    },
+                    registry: active_registry,
+                }
+            }
+            if !shrink_status_equal(shrink_status, capsule.shrink_status) {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_SHRINK_STATUS,
+                    },
+                    registry: active_registry,
+                }
+            }
+            let observed_original = match u256_action_seq_digest(strategy, original) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return StatefulBoundRecheckReport {
+                        outcome: StatefulBoundRecheckOutcome::ReplayInfrastructureError {
+                            error,
+                            stats,
+                        },
+                        registry: active_registry,
+                    }
+                },
+            }
+            if observed_original != capsule.original_digest {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_ORIGINAL_DIGEST,
+                    },
+                    registry: active_registry,
+                }
+            }
+            let observed_reduced = match u256_action_seq_digest(strategy, minimal) {
+                Result::Ok(digest) => digest,
+                Result::Err(error) => {
+                    return StatefulBoundRecheckReport {
+                        outcome: StatefulBoundRecheckOutcome::ReplayInfrastructureError {
+                            error,
+                            stats,
+                        },
+                        registry: active_registry,
+                    }
+                },
+            }
+            if observed_reduced != capsule.reduced_digest {
+                return StatefulBoundRecheckReport {
+                    outcome: StatefulBoundRecheckOutcome::EvidenceMismatch {
+                        field: STATEFUL_EVIDENCE_REDUCED_DIGEST,
+                    },
+                    registry: active_registry,
+                }
+            }
+            StatefulBoundRecheckReport {
+                outcome: StatefulBoundRecheckOutcome::Reproduced {
+                    original,
+                    minimal,
+                    stats,
+                    shrink,
+                    shrink_status,
+                },
+                registry: active_registry,
+            }
+        },
+    }
+}

@@ -40,12 +40,19 @@ impl Copy for StatefulFixturePlan {}
 
 /// Complete logical identity of one stateful property evaluation.
 ///
+/// `run_fingerprint` and `run_namespace` are semantic identities. The
+/// execution namespace and fixture domain may differ during a verified
+/// full-run recheck so the same generated values receive fresh CREATE2 salts.
+/// For the experimental runner both pairs are identical.
+///
 /// local_evaluation_index is zero for an original run or replay evaluation
 /// and starts at one for shrink candidates admitted to property evaluation.
 pub struct StatefulEvaluationContext {
     pub run_fingerprint: u256,
     pub suite_id: u256,
     pub run_namespace: u256,
+    pub execution_namespace: u256,
+    pub fixture_domain: u256,
     pub master_seed: u256,
     pub attempt_index: u256,
     pub local_evaluation_index: u256,
@@ -55,9 +62,9 @@ impl Copy for StatefulEvaluationContext {}
 
 pub fn stateful_fixture_salt(_ context: StatefulEvaluationContext, _ role: FixtureRole) -> u256 {
     canonical_fixture_salt(
-        context.run_fingerprint,
+        context.fixture_domain,
         context.suite_id,
-        context.run_namespace,
+        context.execution_namespace,
         context.master_seed,
         context.attempt_index,
         context.local_evaluation_index,

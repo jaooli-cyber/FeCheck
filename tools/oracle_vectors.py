@@ -304,6 +304,83 @@ LEDGER_MASTER_SEED = 1608
 LEDGER_ATTEMPT_INDEX = 3
 LEDGER_MAX_RNG_REJECTIONS = 64
 
+LEDGER_SUITE_ID = 0x4C4544470001
+LEDGER_BUGGY_NAMESPACE = 1
+LEDGER_REPLAY_NAMESPACE = 3
+LEDGER_TARGET_VALID_CASES = 4
+LEDGER_MAX_DISCARDS = 0
+LEDGER_MAX_SHRINK_EVALUATIONS = 18
+LEDGER_MAX_STATE_EVALUATIONS = 22
+LEDGER_MAX_DEPLOYMENTS = 66
+
+LEDGER_SOURCE_BUNDLE_FINGERPRINT = int(
+    "e7bf9de220a5c32c42ccba23fc5dae8f67c78c75bc3933f99a63073f1d9e98ee", 16
+)
+LEDGER_TOOLCHAIN_FINGERPRINT = int(
+    "5aeb86a363465c7918ea97437c00f7f80f2863b4b8f7dad5edce728a3c8077a0", 16
+)
+LEDGER_ACTION_ENCODING_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/ACTION-ENCODING/V1"
+LEDGER_MODEL_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/MODEL/V1"
+LEDGER_FIXTURE_POLICY_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/FIXTURE-POLICY/V1"
+LEDGER_FAILURE_SCHEMA_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/FAILURE-SCHEMA/V1"
+LEDGER_SNAPSHOT_SCHEMA_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/SNAPSHOT-SCHEMA/V1"
+LEDGER_ADAPTER_LOGIC_DOMAIN = b"FECHECK/ACCOUNTING-LEDGER/ADAPTER-LOGIC/V1"
+
+ledger_action_encoding_hash = keccak256(LEDGER_ACTION_ENCODING_DOMAIN)
+ledger_model_hash = keccak256(LEDGER_MODEL_DOMAIN)
+ledger_fixture_policy_hash = keccak256(LEDGER_FIXTURE_POLICY_DOMAIN)
+ledger_failure_schema_hash = keccak256(LEDGER_FAILURE_SCHEMA_DOMAIN)
+ledger_snapshot_schema_hash = keccak256(LEDGER_SNAPSHOT_SCHEMA_DOMAIN)
+ledger_adapter_logic_hash = keccak256(LEDGER_ADAPTER_LOGIC_DOMAIN)
+
+LEDGER_ACTION_ENCODING_FINGERPRINT = as_int(ledger_action_encoding_hash)
+LEDGER_MODEL_FINGERPRINT = as_int(ledger_model_hash)
+LEDGER_FIXTURE_POLICY_FINGERPRINT = as_int(ledger_fixture_policy_hash)
+LEDGER_FAILURE_SCHEMA_FINGERPRINT = as_int(ledger_failure_schema_hash)
+LEDGER_SNAPSHOT_SCHEMA_FINGERPRINT = as_int(ledger_snapshot_schema_hash)
+LEDGER_ADAPTER_LOGIC_FINGERPRINT = as_int(ledger_adapter_logic_hash)
+
+LEDGER_SEMANTIC_DOMAINS = (
+    ("action_encoding", LEDGER_ACTION_ENCODING_DOMAIN, ledger_action_encoding_hash),
+    ("model", LEDGER_MODEL_DOMAIN, ledger_model_hash),
+    ("fixture_policy", LEDGER_FIXTURE_POLICY_DOMAIN, ledger_fixture_policy_hash),
+    ("failure_schema", LEDGER_FAILURE_SCHEMA_DOMAIN, ledger_failure_schema_hash),
+    ("snapshot_schema", LEDGER_SNAPSHOT_SCHEMA_DOMAIN, ledger_snapshot_schema_hash),
+    ("adapter_logic", LEDGER_ADAPTER_LOGIC_DOMAIN, ledger_adapter_logic_hash),
+)
+LEDGER_BUGGY_INIT_CODE_HASH = int(
+    "7b5481653ad9044d751fb34c7505156e43a0d2a93a327b6b1561081cc028a063", 16
+)
+LEDGER_FIXED_INIT_CODE_HASH = int(
+    "6f5b12aa8bef643d95412a7fb7df3628389d697d1186c9849d530f807e3fbec1", 16
+)
+LEDGER_ACTOR_INIT_CODE_TEMPLATE_HASH = int(
+    "109f96d2218de4843ea2f21d4f8b93fc736477a549d26624216f368888863c21", 16
+)
+LEDGER_BUGGY_RUNTIME_CODE_HASH = int(
+    "85638412d87d4195e2a475b23e0a803d8f669e9f23c653de2f6ca7f878487b5f", 16
+)
+LEDGER_FIXED_RUNTIME_CODE_HASH = int(
+    "607330e267aa0dc7a423da5ae4d8c671fbb05ead67cbb6b977f1d1c3fdff8c21", 16
+)
+LEDGER_ACTOR_RUNTIME_CODE_HASH = int(
+    "29a05393777217742bb4520ca4779be0ced3806b9c9d0ca6c0cee579a34290cf", 16
+)
+
+
+def stateful_word_preimage(domain: str, values: list[int]) -> bytes:
+    """Mirror `keccak_words`: one padded ASCII domain word, then u256 words."""
+    encoded_domain = domain.encode("ascii")
+    if len(encoded_domain) > 32:
+        raise ValueError("stateful word domain exceeds one word")
+    return encoded_domain.ljust(32, b"\x00") + b"".join(u256(value) for value in values)
+
+
+def hash_stateful_words(domain: str, values: list[int]) -> tuple[bytes, bytes]:
+    payload = stateful_word_preimage(domain, values)
+    return payload, keccak256(payload)
+
+
 ledger_bounds_descriptor = as_int(
     keccak256(u256(LEDGER_LO) + u256(LEDGER_HI))
 )
@@ -377,6 +454,146 @@ ledger_draw2_hash = keccak256(ledger_draw2_preimage)
 ledger_draw3_preimage = ledger_draw2_hash
 ledger_draw3_hash = keccak256(ledger_draw3_preimage)
 
+ledger_run_preimage, ledger_run_hash = hash_word_fields(
+    "FECHECK/RUN/V1",
+    [
+        as_int(ledger_generation_hash),
+        LEDGER_SUITE_ID,
+        LEDGER_BUGGY_NAMESPACE,
+        LEDGER_TARGET_VALID_CASES,
+        LEDGER_MAX_DISCARDS,
+        LEDGER_MAX_SHRINK_EVALUATIONS,
+        LEDGER_MAX_STATE_EVALUATIONS,
+        LEDGER_MAX_DEPLOYMENTS,
+        1,
+        1,
+        as_int(action_seq_codec_hash),
+    ],
+)
+
+ledger_original_value_preimage = (
+    encode_bytes(b"FECHECK/VALUE/V1")
+    + u256(2)
+    + field(1, ledger_sequence_hash)
+    + field(2, encode_action_seq([2, 17, 25]))
+)
+ledger_original_value_hash = keccak256(ledger_original_value_preimage)
+ledger_reduced_value_preimage = (
+    encode_bytes(b"FECHECK/VALUE/V1")
+    + u256(2)
+    + field(1, ledger_sequence_hash)
+    + field(2, encode_action_seq([1, 17]))
+)
+ledger_reduced_value_hash = keccak256(ledger_reduced_value_preimage)
+
+ledger_protocol_preimage, ledger_protocol_hash = hash_stateful_words(
+    "FECHECK/STATEFUL-PROTOCOL/V1", [1]
+)
+ledger_fixture_plan_preimage, ledger_fixture_plan_hash = hash_stateful_words(
+    "FECHECK/STATEFUL-FIXTURE/V1", [3]
+)
+
+
+def ledger_adapter_values(target_init: int, target_runtime: int) -> list[int]:
+    return [
+        1,
+        as_int(ledger_protocol_hash),
+        as_int(ledger_fixture_plan_hash),
+        LEDGER_FIXTURE_POLICY_FINGERPRINT,
+        LEDGER_ACTION_ENCODING_FINGERPRINT,
+        LEDGER_MODEL_FINGERPRINT,
+        LEDGER_SNAPSHOT_SCHEMA_FINGERPRINT,
+        LEDGER_FAILURE_SCHEMA_FINGERPRINT,
+        LEDGER_ADAPTER_LOGIC_FINGERPRINT,
+        target_init,
+        LEDGER_ACTOR_INIT_CODE_TEMPLATE_HASH,
+        target_runtime,
+        LEDGER_ACTOR_RUNTIME_CODE_HASH,
+        LEDGER_SOURCE_BUNDLE_FINGERPRINT,
+        LEDGER_TOOLCHAIN_FINGERPRINT,
+    ]
+
+
+ledger_buggy_adapter_values = ledger_adapter_values(
+    LEDGER_BUGGY_INIT_CODE_HASH, LEDGER_BUGGY_RUNTIME_CODE_HASH
+)
+ledger_fixed_adapter_values = ledger_adapter_values(
+    LEDGER_FIXED_INIT_CODE_HASH, LEDGER_FIXED_RUNTIME_CODE_HASH
+)
+ledger_buggy_adapter_preimage, ledger_buggy_adapter_hash = hash_stateful_words(
+    "FECHECK/STATEFUL-ADAPTER/V1", ledger_buggy_adapter_values
+)
+ledger_fixed_adapter_preimage, ledger_fixed_adapter_hash = hash_stateful_words(
+    "FECHECK/STATEFUL-ADAPTER/V1", ledger_fixed_adapter_values
+)
+ledger_bound_run_preimage, ledger_bound_run_hash = hash_stateful_words(
+    "FECHECK/STATEFUL-RUN/V1",
+    [
+        as_int(ledger_run_hash),
+        as_int(ledger_buggy_adapter_hash),
+        LEDGER_FIXTURE_POLICY_FINGERPRINT,
+    ],
+)
+ledger_original_execution_preimage, ledger_original_execution_hash = hash_stateful_words(
+    "FECHECK/EXEC-ORIGINAL/V1",
+    [as_int(ledger_bound_run_hash), LEDGER_BUGGY_NAMESPACE],
+)
+
+ledger_capsule_words = [
+    as_int(b"FECHECK/STATEFUL/CAPSULE/V1".ljust(32, b"\x00")),
+    36,
+    1,
+    1,
+    1,
+    as_int(ledger_protocol_hash),
+    LEDGER_FIXTURE_POLICY_FINGERPRINT,
+    LEDGER_CAPACITY,
+    LEDGER_SUITE_ID,
+    LEDGER_BUGGY_NAMESPACE,
+    LEDGER_MASTER_SEED,
+    LEDGER_ATTEMPT_INDEX,
+    as_int(ledger_attempt_hash),
+    as_int(ledger_generation_hash),
+    as_int(ledger_run_hash),
+    as_int(ledger_bound_run_hash),
+    as_int(ledger_buggy_adapter_hash),
+    0x4C45444701,
+    1,
+    0,
+    as_int(ledger_original_value_hash),
+    as_int(ledger_reduced_value_hash),
+    4,
+    3,
+    0,
+    22,
+    22,
+    66,
+    21,
+    18,
+    2,
+    8,
+    8,
+    0,
+    0,
+]
+ledger_capsule_preimage = b"".join(u256(word) for word in ledger_capsule_words)
+ledger_capsule_hash = keccak256(ledger_capsule_preimage)
+ledger_capsule_wire = ledger_capsule_preimage + ledger_capsule_hash
+ledger_replay_execution_preimage, ledger_replay_execution_hash = hash_stateful_words(
+    "FECHECK/EXEC-REPLAY/V1",
+    [
+        as_int(ledger_bound_run_hash),
+        as_int(ledger_capsule_hash),
+        LEDGER_REPLAY_NAMESPACE,
+    ],
+)
+
+
+def stateful_capsule_wire_is_valid(wire: bytes) -> bool:
+    """Check the V1 exact length and its self-excluding final digest word."""
+    return len(wire) == 1152 and keccak256(wire[:-32]) == wire[-32:]
+
+
 LEDGER_HASH_VECTORS = {
     "accounting_ledger_scalar_strategy": (
         ledger_scalar_preimage,
@@ -417,6 +634,91 @@ LEDGER_HASH_VECTORS = {
         ledger_draw3_preimage,
         ledger_draw3_hash,
         "8a201bc8b5b568757a7a5ea7afbcc934f9536b572c85a0c78c158cfc8350b58e",
+    ),
+    "accounting_ledger_action_encoding": (
+        LEDGER_ACTION_ENCODING_DOMAIN,
+        ledger_action_encoding_hash,
+        "67d58f903806ee40c34cff6cb13414aecfb3683f94ddbaaf7496035d09070625",
+    ),
+    "accounting_ledger_model": (
+        LEDGER_MODEL_DOMAIN,
+        ledger_model_hash,
+        "c1423a868084918f2457dd0d09e75633e135e7b35a854e6bd8dbc65e0815d926",
+    ),
+    "accounting_ledger_fixture_policy": (
+        LEDGER_FIXTURE_POLICY_DOMAIN,
+        ledger_fixture_policy_hash,
+        "8428790e9e9db5de5013ff9db9c9d0f450be0d86247c34bf4854b380c858105a",
+    ),
+    "accounting_ledger_failure_schema": (
+        LEDGER_FAILURE_SCHEMA_DOMAIN,
+        ledger_failure_schema_hash,
+        "65242bbd8ded40b90e37ff842f83ccb18bc65bd14242bbd1146fbeeffc5983f0",
+    ),
+    "accounting_ledger_snapshot_schema": (
+        LEDGER_SNAPSHOT_SCHEMA_DOMAIN,
+        ledger_snapshot_schema_hash,
+        "6d5686d6260d162552aba0c3e17bd7585c780e6cbcdf30197f09fd3c3c562724",
+    ),
+    "accounting_ledger_adapter_logic": (
+        LEDGER_ADAPTER_LOGIC_DOMAIN,
+        ledger_adapter_logic_hash,
+        "6c95e6a147705c2a687d04bf122d69fa31d756405b7d8d9616fad2dee7e11e56",
+    ),
+    "accounting_ledger_run": (
+        ledger_run_preimage,
+        ledger_run_hash,
+        "edc064b8116a6def4ef7a8c49f3801a909a90d7007ad08e0443415c4cb5678e2",
+    ),
+    "accounting_ledger_original_value": (
+        ledger_original_value_preimage,
+        ledger_original_value_hash,
+        "6e62a2972970be70cf7e1196ad1fc9c0594cf5553c801705ac44139677989a4f",
+    ),
+    "accounting_ledger_reduced_value": (
+        ledger_reduced_value_preimage,
+        ledger_reduced_value_hash,
+        "fb7dfe56f9f0dcfd649005d929177699c1edfb58ec19e81a90adb8a24cef0f2e",
+    ),
+    "accounting_ledger_stateful_protocol": (
+        ledger_protocol_preimage,
+        ledger_protocol_hash,
+        "c79098012a110203d44db589835ef53d508b3631ca34432c109ce1c0f65f9c59",
+    ),
+    "accounting_ledger_stateful_fixture_plan": (
+        ledger_fixture_plan_preimage,
+        ledger_fixture_plan_hash,
+        "9d3f8baf2a94f15ffbf65420ddd54bc32f46b0d6672ef0a410d45e6ddd1fbac9",
+    ),
+    "accounting_ledger_buggy_adapter": (
+        ledger_buggy_adapter_preimage,
+        ledger_buggy_adapter_hash,
+        "074365e010d55b454bda6cffd10c9fd83f62290417f5581a6dd6f132835d8d7f",
+    ),
+    "accounting_ledger_fixed_adapter": (
+        ledger_fixed_adapter_preimage,
+        ledger_fixed_adapter_hash,
+        "772a61646078d996bd683a17f541c91ea2969e17afcbac0397937d2c4889e930",
+    ),
+    "accounting_ledger_bound_run": (
+        ledger_bound_run_preimage,
+        ledger_bound_run_hash,
+        "69f5e944243cae3a6d2568006c31fd07b183d55e5747960e508a94db509779ec",
+    ),
+    "accounting_ledger_original_execution": (
+        ledger_original_execution_preimage,
+        ledger_original_execution_hash,
+        "d8759fd98c87d828e1b7497c3e2118105885b49c53eca3eb9d46c1f3324d6fff",
+    ),
+    "accounting_ledger_bound_capsule": (
+        ledger_capsule_preimage,
+        ledger_capsule_hash,
+        "00631848a15b7b3a045f41b45002725bb7ac460ec9a5e76be88e3a3b229ebe45",
+    ),
+    "accounting_ledger_replay_execution": (
+        ledger_replay_execution_preimage,
+        ledger_replay_execution_hash,
+        "fb5bf10a0a82085365c91024ca408259a08a3673bd91ee6413082803aae8e128",
     ),
 }
 
@@ -788,6 +1090,72 @@ def verify_accounting_ledger_vectors() -> None:
         print(f"{name}.preimage.len={len(payload)}")
         print(f"{name}.preimage.hex={payload.hex()}")
         print(f"{name}.keccak256=0x{actual_hex}")
+
+    if len(LEDGER_HASH_VECTORS) != 25:
+        raise AssertionError(
+            f"expected 25 AccountingLedger hash vectors, got {len(LEDGER_HASH_VECTORS)}"
+        )
+    for name, domain, digest in LEDGER_SEMANTIC_DOMAINS:
+        if domain.endswith(b"\x00"):
+            raise AssertionError(f"{name} semantic domain contains a trailing NUL")
+        if keccak256(domain + b"\x00") == digest:
+            raise AssertionError(
+                f"{name} semantic fingerprint failed to distinguish a trailing NUL"
+            )
+
+    if len(ledger_capsule_words) != 35:
+        raise AssertionError("stateful capsule payload must contain exactly 35 words")
+    if len(ledger_capsule_wire) != 1152:
+        raise AssertionError("stateful capsule wire must contain exactly 1152 bytes")
+    if ledger_capsule_wire[:-32] != ledger_capsule_preimage:
+        raise AssertionError("stateful capsule wire payload changed")
+    if ledger_capsule_wire[-32:] != ledger_capsule_hash:
+        raise AssertionError("stateful capsule wire digest word changed")
+
+    if not stateful_capsule_wire_is_valid(ledger_capsule_wire):
+        raise AssertionError("canonical stateful capsule wire was rejected")
+    if stateful_capsule_wire_is_valid(ledger_capsule_wire[:-1]):
+        raise AssertionError("truncated stateful capsule wire was accepted")
+    if stateful_capsule_wire_is_valid(ledger_capsule_wire + b"\x00"):
+        raise AssertionError("stateful capsule wire with trailing data was accepted")
+
+    for index in range(len(ledger_capsule_words)):
+        mutated_wire = bytearray(ledger_capsule_wire)
+        mutated_wire[index * 32 + 31] ^= 1
+        if stateful_capsule_wire_is_valid(bytes(mutated_wire)):
+            raise AssertionError(f"capsule word mutation {index} was accepted")
+    digest_mutation = bytearray(ledger_capsule_wire)
+    digest_mutation[-1] ^= 1
+    if stateful_capsule_wire_is_valid(bytes(digest_mutation)):
+        raise AssertionError("capsule digest mutation was accepted")
+
+    for index in range(len(ledger_buggy_adapter_values)):
+        mutated = ledger_buggy_adapter_values.copy()
+        mutated[index] ^= 1
+        _, mutated_digest = hash_stateful_words(
+            "FECHECK/STATEFUL-ADAPTER/V1", mutated
+        )
+        if mutated_digest == ledger_buggy_adapter_hash:
+            raise AssertionError(f"adapter field mutation {index} was not bound")
+
+    if ledger_fixed_adapter_hash == ledger_buggy_adapter_hash:
+        raise AssertionError("buggy and fixed adapter identities must differ")
+    _, changed_bound = hash_stateful_words(
+        "FECHECK/STATEFUL-RUN/V1",
+        [
+            as_int(ledger_run_hash),
+            as_int(ledger_buggy_adapter_hash),
+            LEDGER_FIXTURE_POLICY_FINGERPRINT ^ 1,
+        ],
+    )
+    if changed_bound == ledger_bound_run_hash:
+        raise AssertionError("fixture-policy mutation was not bound")
+    _, changed_replay = hash_stateful_words(
+        "FECHECK/EXEC-REPLAY/V1",
+        [as_int(ledger_bound_run_hash), as_int(ledger_capsule_hash), 4],
+    )
+    if changed_replay == ledger_replay_execution_hash:
+        raise AssertionError("replay namespace mutation was not bound")
 
     reserved = [
         word
