@@ -2,6 +2,10 @@ pub struct FailureKey { pub kind: u256, pub detail: u256 }
 
 impl Copy for FailureKey {}
 
+pub fn failure_key_equal(_ left: FailureKey, _ right: FailureKey) -> bool {
+    left.kind == right.kind && left.detail == right.detail
+}
+
 pub struct ErrorCode { pub kind: u256, pub detail: u256 }
 
 impl Copy for ErrorCode {}
@@ -20,6 +24,10 @@ pub struct RunStats {
     pub valid_cases: u256,
     pub discards: u256,
     pub property_evaluations: u256,
+    pub state_evaluations: u256,
+    pub fixture_evaluations: u256,
+    pub contract_deployments: u256,
+    pub actions_executed: u256,
 }
 
 impl Copy for RunStats {}
@@ -41,21 +49,34 @@ pub enum ShrinkStatus {
 
 impl Copy for ShrinkStatus {}
 
-pub enum RunOutcome {
+pub enum ExhaustionReason {
+    MaxDiscards,
+    MaxAttempts,
+}
+
+impl Copy for ExhaustionReason {}
+
+pub enum RunOutcome<T> {
     Passed { pub stats: RunStats },
-    Exhausted { pub stats: RunStats },
+    Exhausted {
+        pub reason: ExhaustionReason,
+        pub stats: RunStats,
+    },
     Falsified {
-        pub original: u256,
-        pub minimal: u256,
+        pub original: T,
+        pub minimal: T,
         pub failure: FailureKey,
         pub stats: RunStats,
         pub shrink: ShrinkStats,
         pub shrink_status: ShrinkStatus,
     },
-    InfrastructureError(ErrorCode),
+    InfrastructureError {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+    },
 }
 
-impl Copy for RunOutcome {}
+impl<T> Copy for RunOutcome<T> where T: Copy {}
 
 pub fn verdict_tag(_ verdict: PropertyVerdict) -> u256 {
     match verdict {
@@ -66,10 +87,10 @@ pub fn verdict_tag(_ verdict: PropertyVerdict) -> u256 {
     }
 }
 
-pub fn run_outcome_tag(_ outcome: RunOutcome) -> u256 {
+pub fn run_outcome_tag<T: Copy>(_ outcome: RunOutcome<T>) -> u256 {
     match outcome {
         RunOutcome::Passed { stats: _ } => 0,
-        RunOutcome::Exhausted { stats: _ } => 1,
+        RunOutcome::Exhausted { reason: _, stats: _ } => 1,
         RunOutcome::Falsified {
             original: _,
             minimal: _,
@@ -78,6 +99,6 @@ pub fn run_outcome_tag(_ outcome: RunOutcome) -> u256 {
             shrink: _,
             shrink_status: _,
         } => 2,
-        RunOutcome::InfrastructureError(_) => 3,
+        RunOutcome::InfrastructureError { error: _, stats: _ } => 3,
     }
 }

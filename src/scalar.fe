@@ -1,9 +1,9 @@
 pub struct ScalarShrinkCursor {
-    pub origin: u256,
-    pub current: u256,
-    pub next_step: u256,
-    pub emit_origin: bool,
-    pub done: bool,
+    origin: u256,
+    current: u256,
+    next_step: u256,
+    emit_origin: bool,
+    done: bool,
 }
 
 impl Copy for ScalarShrinkCursor {}

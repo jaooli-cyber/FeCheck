@@ -1,9 +1,9 @@
 use super::outcome::PropertyVerdict
 
 /// Evaluate one property while forwarding the property's complete effect row.
-pub fn evaluate_property<P: Fn(u256) -> PropertyVerdict>(
+pub fn evaluate_property<T: Copy, P: Fn(T) -> PropertyVerdict>(
     _ property: P,
-    _ value: u256,
+    _ value: T,
 ) -> PropertyVerdict
 uses P::E
 {

@@ -1,6 +1,22 @@
 use super::outcome::ErrorCode
-use super::scalar::{ScalarShrinkCursor, ScalarShrinkStep, scalar_shrink_next, scalar_shrink_start}
+use super::scalar::{
+    ScalarShrinkCursor,
+    ScalarShrinkStep,
+    scalar_rank,
+    scalar_shrink_next,
+    scalar_shrink_start,
+}
+use std::evm::keccak_words
 use std::evm::random::Rng
+
+pub const MAX_RNG_REJECTIONS_V1: u256 = 64
+pub const ERROR_INVALID_RANGE: u256 = 1
+pub const ERROR_ORIGIN_OUT_OF_DOMAIN: u256 = 2
+pub const ERROR_REJECTION_LIMIT: u256 = 3
+pub const ERROR_VALUE_OUT_OF_DOMAIN: u256 = 4
+
+const DOMAIN_STRATEGY_V1: u256 = 0x4645434845434b2f53545241544547592f563100000000000000000000000000
+const DOMAIN_VALUE_V1: u256 = 0x4645434845434b2f56414c55452f563100000000000000000000000000000000
 
 pub enum GenerationResult<T> {
     Value(T),
@@ -21,38 +37,44 @@ pub trait Strategy {
     type Value: Copy
     type Cursor: Copy
 
+    fn validate(self) -> Option<ErrorCode>
+    fn contains(self, _ value: Self::Value) -> bool
     fn origin(self) -> Self::Value
+    fn rank(self, _ value: Self::Value) -> Result<ErrorCode, u256>
+    fn fingerprint(self) -> u256
+    fn digest(self, _ value: Self::Value) -> Result<ErrorCode, u256>
     fn random(self) -> GenerationResult<Self::Value> uses E
-    fn shrink_start(self, _ value: Self::Value) -> Self::Cursor
+    fn shrink_start(self, _ value: Self::Value) -> Result<ErrorCode, Self::Cursor>
     fn shrink_next(self, _ cursor: Self::Cursor) -> StrategyShrinkStep<Self::Value, Self::Cursor>
 }
 
-pub struct U256Range { pub lo: u256, pub hi: u256, pub origin: u256, pub max_rejections: u256 }
+pub struct U256Range { pub lo: u256, pub hi: u256, pub origin: u256 }
 
 impl Copy for U256Range {}
 
 #[arithmetic(unchecked)]
-fn bounded_uniform(_ upper: u256, _ max_rejections: u256) -> GenerationResult<u256>
+fn bounded_uniform(_ upper: u256) -> GenerationResult<u256>
 uses (rng: mut Rng)
 {
     if upper == 0 {
-        return GenerationResult::InfrastructureError(ErrorCode { kind: 1, detail: 0 })
+        return GenerationResult::InfrastructureError(
+            ErrorCode { kind: ERROR_INVALID_RANGE, detail: 0 },
+        )
     }
 
     let threshold = (0 - upper) % upper
     var rejected: u256 = 0
-    while rejected <= max_rejections {
+    while rejected < MAX_RNG_REJECTIONS_V1 {
         let word = rng.next()
         if word >= threshold {
             return GenerationResult::Value(word % upper)
         }
-        if rejected == max_rejections {
-            return GenerationResult::InfrastructureError(ErrorCode { kind: 2, detail: rejected })
-        }
         rejected += 1
     }
 
-    GenerationResult::InfrastructureError(ErrorCode { kind: 2, detail: rejected })
+    GenerationResult::InfrastructureError(
+        ErrorCode { kind: ERROR_REJECTION_LIMIT, detail: rejected },
+    )
 }
 
 impl Strategy for U256Range {
@@ -60,13 +82,70 @@ impl Strategy for U256Range {
     type Value = u256
     type Cursor = ScalarShrinkCursor
 
+    fn validate(self) -> Option<ErrorCode> {
+        if self.lo > self.hi {
+            return Option::Some(ErrorCode { kind: ERROR_INVALID_RANGE, detail: self.lo })
+        }
+        if self.origin < self.lo || self.origin > self.hi {
+            return Option::Some(
+                ErrorCode { kind: ERROR_ORIGIN_OUT_OF_DOMAIN, detail: self.origin },
+            )
+        }
+        Option::None
+    }
+
+    fn contains(self, _ value: u256) -> bool {
+        self.validate().is_none() && value >= self.lo && value <= self.hi
+    }
+
     fn origin(self) -> u256 {
         self.origin
     }
 
+    fn rank(self, _ value: u256) -> Result<ErrorCode, u256> {
+        if !self.contains(value) {
+            return Result::Err(
+                ErrorCode { kind: ERROR_VALUE_OUT_OF_DOMAIN, detail: value },
+            )
+        }
+        Result::Ok(scalar_rank(self.origin, value))
+    }
+
+    fn fingerprint(self) -> u256 {
+        keccak_words(
+            [
+                DOMAIN_STRATEGY_V1,
+                5,
+                1,
+                self.lo,
+                2,
+                self.hi,
+                3,
+                self.origin,
+                4,
+                MAX_RNG_REJECTIONS_V1,
+                5,
+            ],
+        )
+    }
+
+    fn digest(self, _ value: u256) -> Result<ErrorCode, u256> {
+        if !self.contains(value) {
+            return Result::Err(
+                ErrorCode { kind: ERROR_VALUE_OUT_OF_DOMAIN, detail: value },
+            )
+        }
+        Result::Ok(
+            keccak_words([DOMAIN_VALUE_V1, 2, 1, self.fingerprint(), 2, value]),
+        )
+    }
+
     fn random(self) -> GenerationResult<u256> uses E {
-        if self.lo > self.hi || self.origin < self.lo || self.origin > self.hi {
-            return GenerationResult::InfrastructureError(ErrorCode { kind: 3, detail: self.origin })
+        match self.validate() {
+            Option::Some(error) => {
+                return GenerationResult::InfrastructureError(error)
+            },
+            Option::None => {},
         }
         if self.lo == self.hi {
             return GenerationResult::Value(self.lo)
@@ -76,7 +155,7 @@ impl Strategy for U256Range {
         }
 
         let span = self.hi - self.lo + 1
-        match bounded_uniform(span, self.max_rejections) {
+        match bounded_uniform(span) {
             GenerationResult::Value(offset) => GenerationResult::Value(self.lo + offset),
             GenerationResult::InfrastructureError(error) => {
                 GenerationResult::InfrastructureError(error)
@@ -84,8 +163,13 @@ impl Strategy for U256Range {
         }
     }
 
-    fn shrink_start(self, _ value: u256) -> ScalarShrinkCursor {
-        scalar_shrink_start(self.origin, value)
+    fn shrink_start(self, _ value: u256) -> Result<ErrorCode, ScalarShrinkCursor> {
+        if !self.contains(value) {
+            return Result::Err(
+                ErrorCode { kind: ERROR_VALUE_OUT_OF_DOMAIN, detail: value },
+            )
+        }
+        Result::Ok(scalar_shrink_start(self.origin, value))
     }
 
     fn shrink_next(self, _ cursor: ScalarShrinkCursor) -> StrategyShrinkStep<

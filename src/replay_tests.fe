@@ -1,0 +1,108 @@
+use ingot::{
+    GenerationResult,
+    RunConfig,
+    U256Range,
+    attempt_seed,
+    generate_u256_attempt,
+    generation_fingerprint,
+    run_fingerprint,
+    u256_edge_at,
+    u256_edge_count,
+    u256_strategy_fingerprint,
+    value_digest,
+}
+
+fn generated_value(_ result: GenerationResult<u256>) -> u256 {
+    match result {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn range_edges_are_deduplicated_and_ordered() {
+    let one = U256Range { lo: 9, hi: 9, origin: 9 }
+    assert!(u256_edge_count(one) == 1)
+    assert!(generated_value(u256_edge_at(one, 0)) == 9)
+
+    let two = U256Range { lo: 9, hi: 10, origin: 9 }
+    assert!(u256_edge_count(two) == 2)
+    assert!(generated_value(u256_edge_at(two, 0)) == 9)
+    assert!(generated_value(u256_edge_at(two, 1)) == 10)
+
+    let three = U256Range { lo: 9, hi: 20, origin: 9 }
+    assert!(u256_edge_count(three) == 3)
+    assert!(generated_value(u256_edge_at(three, 0)) == 9)
+    assert!(generated_value(u256_edge_at(three, 1)) == 10)
+    assert!(generated_value(u256_edge_at(three, 2)) == 20)
+}
+
+#[test]
+fn attempt_identity_is_direct_and_independent_of_shrink_budget() {
+    let strategy = U256Range { lo: 0, hi: 1000, origin: 0 }
+    let strategy_fp = u256_strategy_fingerprint(strategy)
+    let generation = generation_fingerprint(strategy_fp)
+    let direct = generated_value(generate_u256_attempt(strategy, 42, generation, 5))
+
+    var index: u256 = 0
+    var from_full_run: u256 = 0
+    while index <= 5 {
+        let value = generated_value(generate_u256_attempt(strategy, 42, generation, index))
+        if index == 5 {
+            from_full_run = value
+        }
+        index += 1
+    }
+    assert!(direct == from_full_run)
+    assert!(
+        direct == generated_value(generate_u256_attempt(strategy, 42, generation, 5)),
+    )
+
+    let base = RunConfig {
+        suite_id: 1,
+        namespace: 2,
+        target_valid_cases: 20,
+        max_discards: 10,
+        max_shrink_evaluations: 0,
+        format_version: 1,
+        codec_version: 1,
+    }
+    let expanded = RunConfig {
+        suite_id: 1,
+        namespace: 2,
+        target_valid_cases: 20,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        format_version: 1,
+        codec_version: 1,
+    }
+    assert!(
+        run_fingerprint(generation, base) != run_fingerprint(generation, expanded),
+    )
+    assert!(
+        attempt_seed(42, 5, generation) == attempt_seed(42, 5, generation),
+    )
+    assert!(
+        direct == generated_value(generate_u256_attempt(strategy, 42, generation, 5)),
+    )
+}
+
+#[test]
+fn fingerprints_and_value_digests_bind_every_identity_field() {
+    let a = U256Range { lo: 0, hi: 100, origin: 0 }
+    let b = U256Range { lo: 0, hi: 101, origin: 0 }
+    let a_fp = u256_strategy_fingerprint(a)
+    let b_fp = u256_strategy_fingerprint(b)
+    assert!(a_fp != b_fp)
+    assert!(
+        generation_fingerprint(a_fp) != generation_fingerprint(b_fp),
+    )
+    assert!(
+        attempt_seed(7, 3, generation_fingerprint(a_fp))
+            != attempt_seed(7, 4, generation_fingerprint(a_fp)),
+    )
+    assert!(value_digest(a_fp, 12) != value_digest(a_fp, 13))
+}

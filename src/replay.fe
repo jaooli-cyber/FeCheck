@@ -1,0 +1,115 @@
+use super::outcome::ErrorCode
+use super::strategy::{GenerationResult, Strategy, U256Range, generate}
+use std::evm::keccak_words
+use std::evm::random::{KeccakRng, Rng}
+
+pub const DOMAIN_STRATEGY_V1: u256 = 0x4645434845434b2f53545241544547592f563100000000000000000000000000
+pub const DOMAIN_GENERATION_V1: u256 = 0x4645434845434b2f47454e45524154494f4e2f56310000000000000000000000
+pub const DOMAIN_RUN_V1: u256 = 0x4645434845434b2f52554e2f5631000000000000000000000000000000000000
+pub const DOMAIN_ATTEMPT_V1: u256 = 0x4645434845434b2f415454454d50542f56310000000000000000000000000000
+pub const DOMAIN_VALUE_V1: u256 = 0x4645434845434b2f56414c55452f563100000000000000000000000000000000
+
+pub struct RunConfig {
+    pub suite_id: u256,
+    pub namespace: u256,
+    pub target_valid_cases: u256,
+    pub max_discards: u256,
+    pub max_shrink_evaluations: u256,
+    pub format_version: u256,
+    pub codec_version: u256,
+}
+
+impl Copy for RunConfig {}
+
+pub fn u256_strategy_fingerprint(_ strategy: U256Range) -> u256 {
+    strategy.fingerprint()
+}
+
+pub fn generation_fingerprint(_ strategy_fingerprint: u256) -> u256 {
+    keccak_words(
+        [DOMAIN_GENERATION_V1, 3, 1, 1, 2, 1, 3, strategy_fingerprint],
+    )
+}
+
+pub fn run_fingerprint(_ generation: u256, _ config: RunConfig) -> u256 {
+    keccak_words(
+        [
+            DOMAIN_RUN_V1,
+            8,
+            1,
+            generation,
+            2,
+            config.suite_id,
+            3,
+            config.namespace,
+            4,
+            config.target_valid_cases,
+            5,
+            config.max_discards,
+            6,
+            config.max_shrink_evaluations,
+            7,
+            config.format_version,
+            8,
+            config.codec_version,
+        ],
+    )
+}
+
+pub fn attempt_seed(_ master_seed: u256, _ attempt_index: u256, _ generation: u256) -> u256 {
+    keccak_words(
+        [DOMAIN_ATTEMPT_V1, 3, 1, master_seed, 2, attempt_index, 3, generation],
+    )
+}
+
+pub fn value_digest(_ strategy_fingerprint: u256, _ value: u256) -> u256 {
+    keccak_words([DOMAIN_VALUE_V1, 2, 1, strategy_fingerprint, 2, value])
+}
+
+pub fn u256_edge_count(_ strategy: U256Range) -> u256 {
+    if strategy.lo > strategy.hi {
+        return 0
+    }
+    if strategy.lo == strategy.hi {
+        return 1
+    }
+    if strategy.hi == strategy.lo + 1 {
+        return 2
+    }
+    3
+}
+
+pub fn u256_edge_at(_ strategy: U256Range, _ edge_index: u256) -> GenerationResult<u256> {
+    let count = u256_edge_count(strategy)
+    if edge_index >= count {
+        return GenerationResult::InfrastructureError(ErrorCode { kind: 4, detail: edge_index })
+    }
+    if edge_index == 0 {
+        return GenerationResult::Value(strategy.lo)
+    }
+    if edge_index == 1 {
+        return GenerationResult::Value(strategy.lo + 1)
+    }
+    GenerationResult::Value(strategy.hi)
+}
+
+pub fn generate_u256_attempt(
+    _ strategy: U256Range,
+    _ master_seed: u256,
+    _ generation: u256,
+    _ attempt_index: u256,
+) -> GenerationResult<u256> {
+    if strategy.lo > strategy.hi || strategy.origin < strategy.lo || strategy.origin > strategy.hi {
+        return GenerationResult::InfrastructureError(ErrorCode { kind: 3, detail: strategy.origin })
+    }
+
+    let edge_count = u256_edge_count(strategy)
+    if attempt_index < edge_count {
+        return u256_edge_at(strategy, attempt_index)
+    }
+
+    var rng = KeccakRng::seeded(attempt_seed(master_seed, attempt_index, generation))
+    with (Rng = rng) {
+        generate(strategy)
+    }
+}

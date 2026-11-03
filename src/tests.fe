@@ -1,5 +1,6 @@
 use ingot::{
     ErrorCode,
+    ExhaustionReason,
     FECHECK_FORMAT_VERSION,
     FailureKey,
     PropertyVerdict,
@@ -44,7 +45,16 @@ fn outcome_variants_are_data() {
         verdict_tag(PropertyVerdict::InfrastructureError(error)) == 3,
     )
 
-    let stats = RunStats { attempts: 5, valid_cases: 3, discards: 1, property_evaluations: 8 }
+    let stats = RunStats {
+        attempts: 5,
+        valid_cases: 3,
+        discards: 1,
+        property_evaluations: 8,
+        state_evaluations: 0,
+        fixture_evaluations: 0,
+        contract_deployments: 0,
+        actions_executed: 0,
+    }
     let shrink = ShrinkStats {
         evaluations: 3,
         accepted: 2,
@@ -52,10 +62,15 @@ fn outcome_variants_are_data() {
         rejected_discard: 0,
         rejected_failure_key: 0,
     }
-    assert!(run_outcome_tag(RunOutcome::Passed { stats }) == 0)
-    assert!(run_outcome_tag(RunOutcome::Exhausted { stats }) == 1)
+    let passed: RunOutcome<u256> = RunOutcome::Passed { stats }
+    let exhausted: RunOutcome<u256> = RunOutcome::Exhausted {
+        reason: ExhaustionReason::MaxDiscards,
+        stats,
+    }
+    assert!(run_outcome_tag(passed) == 0)
+    assert!(run_outcome_tag(exhausted) == 1)
     assert!(
-        run_outcome_tag(
+        run_outcome_tag<u256>(
                 RunOutcome::Falsified {
                     original: 12,
                     minimal: 10,
@@ -68,7 +83,7 @@ fn outcome_variants_are_data() {
             == 2,
     )
     assert!(
-        run_outcome_tag(RunOutcome::InfrastructureError(error)) == 3,
+        run_outcome_tag<u256>(RunOutcome::InfrastructureError { error, stats }) == 3,
     )
 }
 
