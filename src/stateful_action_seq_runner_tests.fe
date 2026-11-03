@@ -1,0 +1,687 @@
+use ingot::{
+    ERROR_STATEFUL_ACTIONS_EXCEED_SEQUENCE,
+    ERROR_STATEFUL_EVALUATION_BUDGET,
+    ERROR_STATEFUL_PASS_INCOMPLETE_ACTIONS,
+    ERROR_STATEFUL_RUN_DUPLICATE,
+    ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET,
+    ERROR_UNSUPPORTED_CODEC,
+    ActionSeq,
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    RunStats,
+    ShrinkStatus,
+    StatefulActionSeqRequest,
+    StatefulActionSeqRunReport,
+    StatefulEvaluationReceipt,
+    StatefulFixturePreflight,
+    StatefulFixtureRequest,
+    StatefulRunRegistry,
+    StatefulRunRegistryClaim,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_len,
+    action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_stateful_experimental,
+    generation_fingerprint,
+    run_fingerprint,
+    stateful_run_registry_claim,
+    stateful_run_registry_contains,
+    stateful_run_registry_empty,
+    stateful_run_registry_len,
+    u256_action_seq_fingerprint,
+}
+
+const MODE_GOLDEN: u256 = 0
+const MODE_PREFLIGHT_ORIGINAL_ERROR: u256 = 1
+const MODE_PREFLIGHT_SHRINK_ERROR: u256 = 2
+const MODE_EVALUATOR_ORIGINAL_ERROR: u256 = 3
+const MODE_EVALUATOR_SHRINK_ERROR: u256 = 4
+const MODE_ACTIONS_EXCEED: u256 = 5
+const MODE_PASS_INCOMPLETE: u256 = 6
+const MODE_DISCARD_ORIGINAL: u256 = 7
+const MODE_MIXED_SHRINK: u256 = 8
+
+const ERROR_TEST_PREFLIGHT: u256 = 900
+const ERROR_TEST_EVALUATOR: u256 = 901
+const AUDIT_CAPACITY: usize = 32
+
+struct StatefulRunnerAudit {
+    mode: u256,
+    preflight_count: usize,
+    evaluation_count: usize,
+    preflight_run_fingerprints: [u256; AUDIT_CAPACITY],
+    preflight_attempts: [u256; AUDIT_CAPACITY],
+    preflight_locals: [u256; AUDIT_CAPACITY],
+    evaluation_run_fingerprints: [u256; AUDIT_CAPACITY],
+    evaluation_attempts: [u256; AUDIT_CAPACITY],
+    evaluation_locals: [u256; AUDIT_CAPACITY],
+    evaluation_lengths: [u256; AUDIT_CAPACITY],
+}
+
+fn empty_audit(_ mode: u256) -> StatefulRunnerAudit {
+    StatefulRunnerAudit {
+        mode,
+        preflight_count: 0,
+        evaluation_count: 0,
+        preflight_run_fingerprints: [0; AUDIT_CAPACITY],
+        preflight_attempts: [0; AUDIT_CAPACITY],
+        preflight_locals: [0; AUDIT_CAPACITY],
+        evaluation_run_fingerprints: [0; AUDIT_CAPACITY],
+        evaluation_attempts: [0; AUDIT_CAPACITY],
+        evaluation_locals: [0; AUDIT_CAPACITY],
+        evaluation_lengths: [0; AUDIT_CAPACITY],
+    }
+}
+
+fn stateful_strategy() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy { action: U256Range { lo: 0, hi: 3, origin: 0 }, max_actions: 3 }
+}
+
+fn stateful_config(
+    _ target_valid_cases: u256,
+    _ max_shrink_evaluations: u256,
+    _ max_state_evaluations: u256,
+    _ max_deployments: u256,
+    _ codec_fingerprint: u256,
+) -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases,
+        max_discards: 0,
+        max_shrink_evaluations,
+        max_state_evaluations,
+        max_deployments,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint,
+    }
+}
+
+fn normal_config() -> RunConfig {
+    stateful_config(3, 100, 16, 48, action_seq_u256_codec_fingerprint())
+}
+
+fn claim_registry(_ suite_id: u256, _ namespace: u256) -> StatefulRunRegistry {
+    match stateful_run_registry_claim(stateful_run_registry_empty(), suite_id, namespace) {
+        StatefulRunRegistryClaim::Claimed { registry } => registry,
+        StatefulRunRegistryClaim::Rejected { error: _, registry } => {
+            assert!(false)
+            registry
+        },
+    }
+}
+
+fn audited_preflight(_ request: StatefulFixtureRequest) -> StatefulFixturePreflight
+uses (audit: mut StatefulRunnerAudit)
+{
+    let index = audit.preflight_count
+    assert!(index < AUDIT_CAPACITY)
+    assert!(request.context.suite_id == 31)
+    assert!(request.context.run_namespace == 41)
+    assert!(request.context.master_seed == 7)
+    audit.preflight_run_fingerprints[index] = request.context.run_fingerprint
+    audit.preflight_attempts[index] = request.context.attempt_index
+    audit.preflight_locals[index] = request.context.local_evaluation_index
+    audit.preflight_count += 1
+
+    if audit.mode == MODE_PREFLIGHT_ORIGINAL_ERROR
+        || (audit.mode == MODE_PREFLIGHT_SHRINK_ERROR
+            && request.context.local_evaluation_index != 0) {
+        return StatefulFixturePreflight::InfrastructureError {
+            error: ErrorCode {
+                kind: ERROR_TEST_PREFLIGHT,
+                detail: request.context.local_evaluation_index,
+            },
+        }
+    }
+    StatefulFixturePreflight::Ready
+}
+
+fn audited_evaluate(_ request: StatefulActionSeqRequest<3>) -> StatefulEvaluationReceipt
+uses (audit: mut StatefulRunnerAudit)
+{
+    let index = audit.evaluation_count
+    let len = action_seq_len(request.value) as u256
+    assert!(index < AUDIT_CAPACITY)
+    assert!(request.context.suite_id == 31)
+    assert!(request.context.run_namespace == 41)
+    assert!(request.context.master_seed == 7)
+    audit.evaluation_run_fingerprints[index] = request.context.run_fingerprint
+    audit.evaluation_attempts[index] = request.context.attempt_index
+    audit.evaluation_locals[index] = request.context.local_evaluation_index
+    audit.evaluation_lengths[index] = len
+    audit.evaluation_count += 1
+
+    if audit.mode == MODE_EVALUATOR_ORIGINAL_ERROR
+        || (audit.mode == MODE_EVALUATOR_SHRINK_ERROR
+            && request.context.local_evaluation_index != 0) {
+        return StatefulEvaluationReceipt {
+            verdict: PropertyVerdict::InfrastructureError(
+                ErrorCode {
+                    kind: ERROR_TEST_EVALUATOR,
+                    detail: request.context.local_evaluation_index,
+                },
+            ),
+            actions_executed: len,
+        }
+    }
+    if audit.mode == MODE_ACTIONS_EXCEED {
+        return StatefulEvaluationReceipt {
+            verdict: PropertyVerdict::Pass,
+            actions_executed: len + 1,
+        }
+    }
+    if audit.mode == MODE_PASS_INCOMPLETE {
+        var actions: u256 = 0
+        if len > 0 {
+            actions = len - 1
+        }
+        return StatefulEvaluationReceipt {
+            verdict: PropertyVerdict::Pass,
+            actions_executed: actions,
+        }
+    }
+    if audit.mode == MODE_DISCARD_ORIGINAL {
+        return StatefulEvaluationReceipt {
+            verdict: PropertyVerdict::Discard,
+            actions_executed: len,
+        }
+    }
+    if audit.mode == MODE_MIXED_SHRINK && request.context.local_evaluation_index != 0 {
+        if len == 0 {
+            return StatefulEvaluationReceipt {
+                verdict: PropertyVerdict::Discard,
+                actions_executed: len,
+            }
+        }
+        if len == 1 {
+            return StatefulEvaluationReceipt {
+                verdict: PropertyVerdict::Fail(FailureKey { kind: 6, detail: 9 }),
+                actions_executed: len,
+            }
+        }
+        return StatefulEvaluationReceipt {
+            verdict: PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 }),
+            actions_executed: len,
+        }
+    }
+
+    let verdict = if len >= 2 {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+    StatefulEvaluationReceipt { verdict, actions_executed: len }
+}
+
+fn audited_run(_ config: RunConfig, _ registry: StatefulRunRegistry) -> StatefulActionSeqRunReport<
+    3,
+>
+uses (audit: mut StatefulRunnerAudit)
+{
+    check_u256_action_seq_stateful_experimental(
+        stateful_strategy(),
+        7,
+        config,
+        registry,
+        audited_preflight,
+        audited_evaluate,
+    )
+}
+
+fn zero_stats() -> RunStats {
+    RunStats {
+        attempts: 0,
+        valid_cases: 0,
+        discards: 0,
+        property_evaluations: 0,
+        fixture_evaluations: 0,
+        contract_deployments: 0,
+        actions_executed: 0,
+    }
+}
+
+fn expect_infrastructure(
+    _ outcome: RunOutcome<ActionSeq<u256, 3>>,
+    _ expected_kind: u256,
+) -> RunStats {
+    match outcome {
+        RunOutcome::InfrastructureError { error, stats } => {
+            assert!(error.kind == expected_kind)
+            stats
+        },
+        _ => {
+            assert!(false)
+            zero_stats()
+        },
+    }
+}
+
+fn expect_configuration(
+    _ outcome: RunOutcome<ActionSeq<u256, 3>>,
+    _ expected_kind: u256,
+) -> RunStats {
+    match outcome {
+        RunOutcome::ConfigurationError { error, stats } => {
+            assert!(error.kind == expected_kind)
+            stats
+        },
+        _ => {
+            assert!(false)
+            zero_stats()
+        },
+    }
+}
+
+fn assert_zero_stats(_ stats: RunStats) {
+    assert!(stats.attempts == 0)
+    assert!(stats.valid_cases == 0)
+    assert!(stats.discards == 0)
+    assert!(stats.property_evaluations == 0)
+    assert!(stats.fixture_evaluations == 0)
+    assert!(stats.contract_deployments == 0)
+    assert!(stats.actions_executed == 0)
+}
+
+#[test]
+fn target_zero_keeps_the_registry_and_skips_both_callbacks() {
+    let input_registry = claim_registry(91, 92)
+    var audit = empty_audit(MODE_GOLDEN)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(
+            stateful_config(0, 100, 16, 48, action_seq_u256_codec_fingerprint()),
+            input_registry,
+        )
+    }
+    match report.outcome {
+        RunOutcome::Passed { stats } => assert_zero_stats(stats),
+        _ => assert!(false),
+    }
+    assert!(audit.preflight_count == 0)
+    assert!(audit.evaluation_count == 0)
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(stateful_run_registry_contains(report.registry, 91, 92))
+    assert!(!stateful_run_registry_contains(report.registry, 31, 41))
+}
+
+#[test]
+fn configuration_static_plan_and_registry_errors_follow_precedence() {
+    let duplicate = claim_registry(31, 41)
+
+    var invalid_config_audit = empty_audit(MODE_GOLDEN)
+    let invalid_config = with (StatefulRunnerAudit = mut invalid_config_audit) {
+        audited_run(stateful_config(3, 100, 2, 5, 0), duplicate)
+    }
+    assert_zero_stats(
+        expect_configuration(invalid_config.outcome, ERROR_UNSUPPORTED_CODEC),
+    )
+    assert!(stateful_run_registry_len(invalid_config.registry) == 1)
+    assert!(invalid_config_audit.preflight_count == 0)
+    assert!(invalid_config_audit.evaluation_count == 0)
+
+    var invalid_plan_audit = empty_audit(MODE_GOLDEN)
+    let invalid_plan = with (StatefulRunnerAudit = mut invalid_plan_audit) {
+        audited_run(
+            stateful_config(3, 100, 2, 5, action_seq_u256_codec_fingerprint()),
+            duplicate,
+        )
+    }
+    assert_zero_stats(
+        expect_configuration(
+            invalid_plan.outcome,
+            ERROR_STATEFUL_STATIC_DEPLOYMENT_BUDGET,
+        ),
+    )
+    assert!(stateful_run_registry_len(invalid_plan.registry) == 1)
+    assert!(invalid_plan_audit.preflight_count == 0)
+    assert!(invalid_plan_audit.evaluation_count == 0)
+
+    var duplicate_audit = empty_audit(MODE_GOLDEN)
+    let duplicate_report = with (StatefulRunnerAudit = mut duplicate_audit) {
+        audited_run(normal_config(), duplicate)
+    }
+    assert_zero_stats(
+        expect_configuration(duplicate_report.outcome, ERROR_STATEFUL_RUN_DUPLICATE),
+    )
+    assert!(stateful_run_registry_len(duplicate_report.registry) == 1)
+    assert!(duplicate_audit.preflight_count == 0)
+    assert!(duplicate_audit.evaluation_count == 0)
+}
+
+#[test]
+fn golden_failure_shrinks_with_fresh_contexts_and_exact_counters() {
+    let config = normal_config()
+    var audit = empty_audit(MODE_GOLDEN)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(config, stateful_run_registry_empty())
+    }
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(failure.kind == 5)
+            assert!(failure.detail == 9)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 8)
+            assert!(stats.fixture_evaluations == 8)
+            assert!(stats.contract_deployments == 24)
+            assert!(stats.actions_executed == 8)
+            assert!(shrink.evaluations == 5)
+            assert!(shrink.accepted == 1)
+            assert!(shrink.rejected_pass == 4)
+            assert!(shrink.rejected_discard == 0)
+            assert!(shrink.rejected_failure_key == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(stateful_run_registry_contains(report.registry, 31, 41))
+    assert!(audit.preflight_count == 8)
+    assert!(audit.evaluation_count == 8)
+    assert!(audit.evaluation_attempts[0] == 0)
+    assert!(audit.evaluation_attempts[1] == 1)
+    assert!(audit.evaluation_attempts[2] == 2)
+    assert!(audit.evaluation_attempts[3] == 2)
+    assert!(audit.evaluation_attempts[7] == 2)
+    assert!(audit.evaluation_locals[0] == 0)
+    assert!(audit.evaluation_locals[1] == 0)
+    assert!(audit.evaluation_locals[2] == 0)
+    assert!(audit.evaluation_locals[3] == 1)
+    assert!(audit.evaluation_locals[4] == 2)
+    assert!(audit.evaluation_locals[5] == 3)
+    assert!(audit.evaluation_locals[6] == 4)
+    assert!(audit.evaluation_locals[7] == 5)
+    assert!(audit.evaluation_lengths[0] == 0)
+    assert!(audit.evaluation_lengths[1] == 1)
+    assert!(audit.evaluation_lengths[2] == 3)
+    assert!(audit.evaluation_lengths[3] == 0)
+    assert!(audit.evaluation_lengths[4] == 1)
+    assert!(audit.evaluation_lengths[5] == 2)
+    assert!(audit.evaluation_lengths[6] == 0)
+    assert!(audit.evaluation_lengths[7] == 1)
+    assert!(
+        audit.preflight_attempts[3] == audit.evaluation_attempts[3],
+    )
+    assert!(audit.preflight_locals[7] == audit.evaluation_locals[7])
+
+    let expected_run = run_fingerprint(
+        generation_fingerprint(u256_action_seq_fingerprint(stateful_strategy())),
+        config,
+    )
+    assert!(audit.preflight_run_fingerprints[0] == expected_run)
+    assert!(audit.evaluation_run_fingerprints[0] == expected_run)
+    assert!(audit.evaluation_run_fingerprints[7] == expected_run)
+}
+
+#[test]
+fn state_budget_rejects_before_preflight_and_does_not_adopt_registry_claim() {
+    var audit = empty_audit(MODE_GOLDEN)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(
+            stateful_config(3, 100, 0, 0, action_seq_u256_codec_fingerprint()),
+            stateful_run_registry_empty(),
+        )
+    }
+    assert_zero_stats(
+        expect_infrastructure(report.outcome, ERROR_STATEFUL_EVALUATION_BUDGET),
+    )
+    assert!(stateful_run_registry_len(report.registry) == 0)
+    assert!(audit.preflight_count == 0)
+    assert!(audit.evaluation_count == 0)
+}
+
+#[test]
+fn original_preflight_error_consumes_nothing_and_keeps_registry_unclaimed() {
+    var audit = empty_audit(MODE_PREFLIGHT_ORIGINAL_ERROR)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    assert_zero_stats(
+        expect_infrastructure(report.outcome, ERROR_TEST_PREFLIGHT),
+    )
+    assert!(stateful_run_registry_len(report.registry) == 0)
+    assert!(audit.preflight_count == 1)
+    assert!(audit.evaluation_count == 0)
+    assert!(audit.preflight_attempts[0] == 0)
+    assert!(audit.preflight_locals[0] == 0)
+}
+
+#[test]
+fn shrink_preflight_error_does_not_consume_candidate_or_local_index() {
+    var audit = empty_audit(MODE_PREFLIGHT_SHRINK_ERROR)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    let stats = expect_infrastructure(report.outcome, ERROR_TEST_PREFLIGHT)
+    assert!(stats.attempts == 3)
+    assert!(stats.valid_cases == 2)
+    assert!(stats.discards == 0)
+    assert!(stats.property_evaluations == 3)
+    assert!(stats.fixture_evaluations == 3)
+    assert!(stats.contract_deployments == 9)
+    assert!(stats.actions_executed == 4)
+    assert!(stateful_run_registry_contains(report.registry, 31, 41))
+    assert!(audit.preflight_count == 4)
+    assert!(audit.evaluation_count == 3)
+    assert!(audit.preflight_attempts[3] == 2)
+    assert!(audit.preflight_locals[3] == 1)
+}
+
+#[test]
+fn evaluator_infrastructure_preserves_original_and_shrink_consumption() {
+    var original_audit = empty_audit(MODE_EVALUATOR_ORIGINAL_ERROR)
+    let original_report = with (StatefulRunnerAudit = mut original_audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    let original_stats = expect_infrastructure(original_report.outcome, ERROR_TEST_EVALUATOR)
+    assert!(original_stats.attempts == 1)
+    assert!(original_stats.valid_cases == 0)
+    assert!(original_stats.property_evaluations == 1)
+    assert!(original_stats.fixture_evaluations == 1)
+    assert!(original_stats.contract_deployments == 3)
+    assert!(original_stats.actions_executed == 0)
+    assert!(
+        stateful_run_registry_contains(original_report.registry, 31, 41),
+    )
+    assert!(original_audit.preflight_count == 1)
+    assert!(original_audit.evaluation_count == 1)
+
+    var shrink_audit = empty_audit(MODE_EVALUATOR_SHRINK_ERROR)
+    let shrink_report = with (StatefulRunnerAudit = mut shrink_audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    let shrink_stats = expect_infrastructure(shrink_report.outcome, ERROR_TEST_EVALUATOR)
+    assert!(shrink_stats.attempts == 3)
+    assert!(shrink_stats.valid_cases == 2)
+    assert!(shrink_stats.property_evaluations == 4)
+    assert!(shrink_stats.fixture_evaluations == 4)
+    assert!(shrink_stats.contract_deployments == 12)
+    assert!(shrink_stats.actions_executed == 4)
+    assert!(shrink_audit.preflight_count == 4)
+    assert!(shrink_audit.evaluation_count == 4)
+    assert!(shrink_audit.evaluation_attempts[3] == 2)
+    assert!(shrink_audit.evaluation_locals[3] == 1)
+}
+
+#[test]
+fn invalid_action_receipts_are_typed_after_fixture_accounting() {
+    var excessive_audit = empty_audit(MODE_ACTIONS_EXCEED)
+    let excessive = with (StatefulRunnerAudit = mut excessive_audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    let excessive_stats = expect_infrastructure(
+        excessive.outcome,
+        ERROR_STATEFUL_ACTIONS_EXCEED_SEQUENCE,
+    )
+    assert!(excessive_stats.attempts == 1)
+    assert!(excessive_stats.valid_cases == 0)
+    assert!(excessive_stats.property_evaluations == 1)
+    assert!(excessive_stats.fixture_evaluations == 1)
+    assert!(excessive_stats.contract_deployments == 3)
+    assert!(excessive_stats.actions_executed == 0)
+    assert!(stateful_run_registry_contains(excessive.registry, 31, 41))
+
+    var incomplete_audit = empty_audit(MODE_PASS_INCOMPLETE)
+    let incomplete = with (StatefulRunnerAudit = mut incomplete_audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    let incomplete_stats = expect_infrastructure(
+        incomplete.outcome,
+        ERROR_STATEFUL_PASS_INCOMPLETE_ACTIONS,
+    )
+    assert!(incomplete_stats.attempts == 2)
+    assert!(incomplete_stats.valid_cases == 1)
+    assert!(incomplete_stats.property_evaluations == 2)
+    assert!(incomplete_stats.fixture_evaluations == 2)
+    assert!(incomplete_stats.contract_deployments == 6)
+    assert!(incomplete_stats.actions_executed == 0)
+    assert!(incomplete_audit.preflight_count == 2)
+    assert!(incomplete_audit.evaluation_count == 2)
+}
+
+#[test]
+fn original_discard_exhausts_with_exact_stateful_counters() {
+    var audit = empty_audit(MODE_DISCARD_ORIGINAL)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    match report.outcome {
+        RunOutcome::Exhausted { reason, stats } => {
+            match reason {
+                ExhaustionReason::MaxDiscards => {},
+            }
+            assert!(stats.attempts == 1)
+            assert!(stats.valid_cases == 0)
+            assert!(stats.discards == 1)
+            assert!(stats.property_evaluations == 1)
+            assert!(stats.fixture_evaluations == 1)
+            assert!(stats.contract_deployments == 3)
+            assert!(stats.actions_executed == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(stateful_run_registry_contains(report.registry, 31, 41))
+    assert!(audit.preflight_count == 1)
+    assert!(audit.evaluation_count == 1)
+    assert!(audit.evaluation_attempts[0] == 0)
+    assert!(audit.evaluation_locals[0] == 0)
+}
+
+#[test]
+fn mixed_shrink_classifies_discard_and_other_failure_without_accepting_them() {
+    var audit = empty_audit(MODE_MIXED_SHRINK)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(normal_config(), stateful_run_registry_empty())
+    }
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(failure.kind == 5)
+            assert!(failure.detail == 9)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 8)
+            assert!(stats.fixture_evaluations == 8)
+            assert!(stats.contract_deployments == 24)
+            assert!(stats.actions_executed == 8)
+            assert!(shrink.evaluations == 5)
+            assert!(shrink.accepted == 1)
+            assert!(shrink.rejected_pass == 0)
+            assert!(shrink.rejected_discard == 2)
+            assert!(shrink.rejected_failure_key == 2)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(stateful_run_registry_contains(report.registry, 31, 41))
+    assert!(audit.preflight_count == 8)
+    assert!(audit.evaluation_count == 8)
+    assert!(audit.evaluation_attempts[2] == 2)
+    assert!(audit.evaluation_attempts[7] == 2)
+    assert!(audit.evaluation_locals[3] == 1)
+    assert!(audit.evaluation_locals[4] == 2)
+    assert!(audit.evaluation_locals[5] == 3)
+    assert!(audit.evaluation_locals[6] == 4)
+    assert!(audit.evaluation_locals[7] == 5)
+    assert!(audit.evaluation_lengths[3] == 0)
+    assert!(audit.evaluation_lengths[4] == 1)
+    assert!(audit.evaluation_lengths[5] == 2)
+    assert!(audit.evaluation_lengths[6] == 0)
+    assert!(audit.evaluation_lengths[7] == 1)
+}
+
+#[test]
+fn shrink_budget_precedes_the_exhausted_state_budget() {
+    var audit = empty_audit(MODE_GOLDEN)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(
+            stateful_config(3, 0, 3, 9, action_seq_u256_codec_fingerprint()),
+            stateful_run_registry_empty(),
+        )
+    }
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure: _, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 3)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.property_evaluations == 3)
+            assert!(stats.fixture_evaluations == 3)
+            assert!(stats.contract_deployments == 9)
+            assert!(stats.actions_executed == 4)
+            assert!(shrink.evaluations == 0)
+            assert!(shrink.accepted == 0)
+            assert!(shrink.rejected_pass == 0)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                ShrinkStatus::CompleteLocal => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(audit.preflight_count == 3)
+    assert!(audit.evaluation_count == 3)
+}
+
+#[test]
+fn first_ready_preflight_adopts_the_registry_claim() {
+    var audit = empty_audit(MODE_GOLDEN)
+    let report = with (StatefulRunnerAudit = mut audit) {
+        audited_run(
+            stateful_config(1, 0, 1, 3, action_seq_u256_codec_fingerprint()),
+            stateful_run_registry_empty(),
+        )
+    }
+    match report.outcome {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 1)
+            assert!(stats.valid_cases == 1)
+            assert!(stats.property_evaluations == 1)
+            assert!(stats.fixture_evaluations == 1)
+            assert!(stats.contract_deployments == 3)
+            assert!(stats.actions_executed == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(stateful_run_registry_contains(report.registry, 31, 41))
+    assert!(audit.preflight_count == 1)
+    assert!(audit.evaluation_count == 1)
+}
