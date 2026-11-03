@@ -3,7 +3,7 @@ use ingot::{
     FailureKey,
     PropertyVerdict,
     action_seq_is_valid,
-    action_seq_u256_digest,
+    action_seq_u256_digest_spike,
     evaluate_property,
     verdict_tag,
 }
@@ -61,20 +61,20 @@ fn action_sequence_is_copy_bounded_and_tail_independent() {
     assert!(copied.items[0] == 7)
     assert!(copied.len == 2)
     assert!(
-        expect_action_digest(action_seq_u256_digest(left))
-            == expect_action_digest(action_seq_u256_digest(right)),
+        expect_action_digest(action_seq_u256_digest_spike(left))
+            == expect_action_digest(action_seq_u256_digest_spike(right)),
     )
     assert!(
-        expect_action_digest(action_seq_u256_digest(left))
-            != expect_action_digest(action_seq_u256_digest(changed)),
+        expect_action_digest(action_seq_u256_digest_spike(left))
+            != expect_action_digest(action_seq_u256_digest_spike(changed)),
     )
 
     let same_logical = ActionSeq<u256, 5> { items: [7, 9, 1, 2, 3], len: 2 }
     assert!(
-        expect_action_digest(action_seq_u256_digest(left))
-            == expect_action_digest(action_seq_u256_digest(same_logical)),
+        expect_action_digest(action_seq_u256_digest_spike(left))
+            == expect_action_digest(action_seq_u256_digest_spike(same_logical)),
     )
 
     let invalid = ActionSeq<u256, 1> { items: [7], len: 2 }
-    assert!(action_seq_u256_digest(invalid).is_err())
+    assert!(action_seq_u256_digest_spike(invalid).is_err())
 }

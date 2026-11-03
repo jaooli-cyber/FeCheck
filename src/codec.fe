@@ -1,0 +1,201 @@
+use core::{AsBytes, ByteWriter, keccak}
+
+const WORD_BYTES: u256 = 32
+
+const fn push_word_field<const M: usize>(_ out: mut ByteWriter<M>, _ tag: u256, _ value: u256) {
+    out.push_word(tag, width: 32)
+    out.push_word(WORD_BYTES, width: 32)
+    out.push_word(value, width: 32)
+}
+
+struct StrategyPreimage {
+    f1: u256,
+    f2: u256,
+    f3: u256,
+    f4: u256,
+    f5: u256,
+    f6: u256,
+    f7: u256,
+    f8: u256,
+    f9: u256,
+    f10: u256,
+}
+
+impl AsBytes for StrategyPreimage {
+    const N: usize = 1043
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(19, width: 32)
+        out.append("FECHECK/STRATEGY/V1" as String<19>)
+        out.push_word(10, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+        push_word_field(mut out, 3, self.f3)
+        push_word_field(mut out, 4, self.f4)
+        push_word_field(mut out, 5, self.f5)
+        push_word_field(mut out, 6, self.f6)
+        push_word_field(mut out, 7, self.f7)
+        push_word_field(mut out, 8, self.f8)
+        push_word_field(mut out, 9, self.f9)
+        push_word_field(mut out, 10, self.f10)
+    }
+}
+
+struct GenerationPreimage { f1: u256, f2: u256, f3: u256 }
+
+impl AsBytes for GenerationPreimage {
+    const N: usize = 373
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(21, width: 32)
+        out.append("FECHECK/GENERATION/V1" as String<21>)
+        out.push_word(3, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+        push_word_field(mut out, 3, self.f3)
+    }
+}
+
+struct RunPreimage {
+    f1: u256,
+    f2: u256,
+    f3: u256,
+    f4: u256,
+    f5: u256,
+    f6: u256,
+    f7: u256,
+    f8: u256,
+    f9: u256,
+    f10: u256,
+    f11: u256,
+}
+
+impl AsBytes for RunPreimage {
+    const N: usize = 1134
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(14, width: 32)
+        out.append("FECHECK/RUN/V1" as String<14>)
+        out.push_word(11, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+        push_word_field(mut out, 3, self.f3)
+        push_word_field(mut out, 4, self.f4)
+        push_word_field(mut out, 5, self.f5)
+        push_word_field(mut out, 6, self.f6)
+        push_word_field(mut out, 7, self.f7)
+        push_word_field(mut out, 8, self.f8)
+        push_word_field(mut out, 9, self.f9)
+        push_word_field(mut out, 10, self.f10)
+        push_word_field(mut out, 11, self.f11)
+    }
+}
+
+struct AttemptPreimage { f1: u256, f2: u256, f3: u256 }
+
+impl AsBytes for AttemptPreimage {
+    const N: usize = 370
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(18, width: 32)
+        out.append("FECHECK/ATTEMPT/V1" as String<18>)
+        out.push_word(3, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+        push_word_field(mut out, 3, self.f3)
+    }
+}
+
+struct ValuePreimage { f1: u256, f2: u256 }
+
+impl AsBytes for ValuePreimage {
+    const N: usize = 272
+
+    const fn append_to<const M: usize>(self, _ out: mut ByteWriter<M>) {
+        out.push_word(16, width: 32)
+        out.append("FECHECK/VALUE/V1" as String<16>)
+        out.push_word(2, width: 32)
+        push_word_field(mut out, 1, self.f1)
+        push_word_field(mut out, 2, self.f2)
+    }
+}
+
+pub fn canonical_strategy_fingerprint(
+    _ f1: u256,
+    _ f2: u256,
+    _ f3: u256,
+    _ f4: u256,
+    _ f5: u256,
+    _ f6: u256,
+    _ f7: u256,
+    _ f8: u256,
+    _ f9: u256,
+    _ f10: u256,
+) -> u256 {
+    keccak(
+        StrategyPreimage { f1, f2, f3, f4, f5, f6, f7, f8, f9, f10 },
+    )
+}
+
+pub fn canonical_generation_fingerprint(
+    _ algorithm_version: u256,
+    _ edge_policy_version: u256,
+    _ strategy_fingerprint: u256,
+) -> u256 {
+    keccak(
+        GenerationPreimage {
+            f1: algorithm_version,
+            f2: edge_policy_version,
+            f3: strategy_fingerprint,
+        },
+    )
+}
+
+pub fn canonical_run_fingerprint(
+    _ f1: u256,
+    _ f2: u256,
+    _ f3: u256,
+    _ f4: u256,
+    _ f5: u256,
+    _ f6: u256,
+    _ f7: u256,
+    _ f8: u256,
+    _ f9: u256,
+    _ f10: u256,
+    _ f11: u256,
+) -> u256 {
+    keccak(
+        RunPreimage { f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11 },
+    )
+}
+
+pub fn canonical_attempt_seed(
+    _ master_seed: u256,
+    _ attempt_index: u256,
+    _ generation_fingerprint: u256,
+) -> u256 {
+    keccak(
+        AttemptPreimage { f1: master_seed, f2: attempt_index, f3: generation_fingerprint },
+    )
+}
+
+pub fn canonical_value_digest(_ strategy_fingerprint: u256, _ value: u256) -> u256 {
+    keccak(ValuePreimage { f1: strategy_fingerprint, f2: value })
+}
+
+pub fn u256_bounds_descriptor(_ lo: u256, _ hi: u256) -> u256 {
+    keccak((lo, hi))
+}
+
+pub fn ordered_edges_descriptor(
+    _ count: u256,
+    _ edge0: u256,
+    _ edge1: u256,
+    _ edge2: u256,
+) -> u256 {
+    keccak((count, edge0, edge1, edge2))
+}
+
+pub fn u256_codec_fingerprint() -> u256 {
+    keccak("FECHECK/CODEC/U256/V1" as String<21>)
+}

@@ -1,0 +1,88 @@
+use super::codec::{canonical_strategy_fingerprint, canonical_value_digest, ordered_edges_descriptor}
+use super::outcome::ErrorCode
+use super::strategy::{
+    EDGE_ENUMERATION_POLICY_V1,
+    GenerationResult,
+    SHRINK_ENUMERATION_POLICY_V1,
+    Strategy,
+    StrategyShrinkStep,
+    VALUE_ENCODING_VERSION_V1,
+}
+use std::evm::random::Rng
+
+pub const STRATEGY_KIND_BOOL_V1: u256 = 2
+const DESCRIPTOR_NONE: u256 = 0
+
+pub struct BoolStrategy { pub origin: bool }
+
+impl Copy for BoolStrategy {}
+
+pub struct BoolShrinkCursor { origin: bool, current: bool, emitted: bool }
+
+impl Copy for BoolShrinkCursor {}
+
+fn bool_word(_ value: bool) -> u256 {
+    if value { 1 } else { 0 }
+}
+
+impl Strategy for BoolStrategy {
+    uses E = (rng: mut Rng)
+    type Value = bool
+    type Cursor = BoolShrinkCursor
+
+    fn validate(self) -> Option<ErrorCode> {
+        Option::None
+    }
+
+    fn contains(self, _ value: bool) -> bool {
+        true
+    }
+
+    fn origin(self) -> bool {
+        self.origin
+    }
+
+    fn rank(self, _ value: bool) -> Result<ErrorCode, u256> {
+        Result::Ok(if value == self.origin { 0 } else { 1 })
+    }
+
+    fn fingerprint(self) -> u256 {
+        canonical_strategy_fingerprint(
+            STRATEGY_KIND_BOOL_V1,
+            DESCRIPTOR_NONE,
+            bool_word(self.origin),
+            DESCRIPTOR_NONE,
+            DESCRIPTOR_NONE,
+            DESCRIPTOR_NONE,
+            ordered_edges_descriptor(2, 0, 1, 0),
+            EDGE_ENUMERATION_POLICY_V1,
+            SHRINK_ENUMERATION_POLICY_V1,
+            VALUE_ENCODING_VERSION_V1,
+        )
+    }
+
+    fn digest(self, _ value: bool) -> Result<ErrorCode, u256> {
+        Result::Ok(
+            canonical_value_digest(self.fingerprint(), bool_word(value)),
+        )
+    }
+
+    fn random(self) -> GenerationResult<bool> uses E {
+        GenerationResult::Value((rng.next() & 1) == 1)
+    }
+
+    fn shrink_start(self, _ value: bool) -> Result<ErrorCode, BoolShrinkCursor> {
+        Result::Ok(
+            BoolShrinkCursor { origin: self.origin, current: value, emitted: false },
+        )
+    }
+
+    fn shrink_next(self, _ cursor: BoolShrinkCursor) -> StrategyShrinkStep<bool, BoolShrinkCursor> {
+        if cursor.current == cursor.origin || cursor.emitted {
+            return StrategyShrinkStep::Done
+        }
+        var next = cursor
+        next.emitted = true
+        StrategyShrinkStep::Candidate { value: cursor.origin, cursor: next }
+    }
+}

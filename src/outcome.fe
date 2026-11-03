@@ -51,7 +51,6 @@ impl Copy for ShrinkStatus {}
 
 pub enum ExhaustionReason {
     MaxDiscards,
-    MaxAttempts,
 }
 
 impl Copy for ExhaustionReason {}

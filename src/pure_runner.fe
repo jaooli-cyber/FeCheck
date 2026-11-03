@@ -1,3 +1,4 @@
+use super::codec::u256_codec_fingerprint
 use super::outcome::{
     ErrorCode,
     ExhaustionReason,
@@ -10,6 +11,8 @@ use super::outcome::{
     failure_key_equal,
 }
 use super::replay::{
+    CAPSULE_FORMAT_VERSION_V1,
+    DIGEST_FORMAT_VERSION_V1,
     RunConfig,
     generate_u256_attempt,
     generation_fingerprint,
@@ -19,9 +22,27 @@ use super::strategy::{GenerationResult, Strategy, StrategyShrinkStep, U256Range}
 
 pub const MAX_ATTEMPTS_V1: u256 = 4096
 pub const MAX_SHRINK_EVALUATIONS_V1: u256 = 4096
+pub const MAX_STATE_EVALUATIONS_V1: u256 = 4096
+pub const MAX_DEPLOYMENTS_V1: u256 = 4096
 pub const ERROR_UNSUPPORTED_FORMAT: u256 = 200
 pub const ERROR_LIMIT_TOO_LARGE: u256 = 201
+
+pub trait PureU256Property: Copy {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict
+}
+
+pub(ingot) struct PureU256Callable<P: PureU256Property> { pub property: P }
+
+impl<P: PureU256Property> Fn(u256) -> _ for PureU256Callable<P> {
+    uses E = ()
+    type Out = PropertyVerdict
+
+    fn call(self, _ value: u256) -> PropertyVerdict {
+        self.property.evaluate(value)
+    }
+}
 pub const ERROR_INVALID_SHRINK_CANDIDATE: u256 = 202
+pub const ERROR_UNSUPPORTED_CODEC: u256 = 203
 
 pub enum U256ShrinkResult {
     Complete {
@@ -64,7 +85,10 @@ fn shrink_infrastructure(_ error: ErrorCode, _ stats: ShrinkStats) -> U256Shrink
     U256ShrinkResult::InfrastructureError { error, stats }
 }
 
-pub fn shrink_u256<P: Fn(u256) -> PropertyVerdict>(
+/// Low-level shrink primitive. The caller must already have observed `original`
+/// fail with exactly `failure`; the checked runner establishes this
+/// precondition before calling it.
+pub(ingot) fn shrink_u256_prevalidated<P: Fn(u256) -> PropertyVerdict>(
     _ strategy: U256Range,
     _ original: u256,
     _ failure: FailureKey,
@@ -171,11 +195,56 @@ uses P::E
     )
 }
 
+pub(ingot) fn validate_run_config(_ config: RunConfig) -> Option<ErrorCode> {
+    if config.digest_format_version != DIGEST_FORMAT_VERSION_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.digest_format_version },
+        )
+    }
+    if config.capsule_format_version != CAPSULE_FORMAT_VERSION_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.capsule_format_version },
+        )
+    }
+    if config.codec_fingerprint != u256_codec_fingerprint() {
+        return Option::Some(
+            ErrorCode { kind: ERROR_UNSUPPORTED_CODEC, detail: config.codec_fingerprint },
+        )
+    }
+    if config.target_valid_cases > MAX_ATTEMPTS_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.target_valid_cases },
+        )
+    }
+    if config.max_discards > MAX_ATTEMPTS_V1 - config.target_valid_cases {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_discards },
+        )
+    }
+    if config.max_shrink_evaluations > MAX_SHRINK_EVALUATIONS_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_shrink_evaluations },
+        )
+    }
+    if config.max_state_evaluations > MAX_STATE_EVALUATIONS_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_state_evaluations },
+        )
+    }
+    if config.max_deployments > MAX_DEPLOYMENTS_V1 {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_deployments },
+        )
+    }
+    Option::None
+}
 fn configuration_error(_ error: ErrorCode) -> RunOutcome<u256> {
     RunOutcome::ConfigurationError { error, stats: empty_run_stats() }
 }
 
-pub fn check_u256<P: Fn(u256) -> PropertyVerdict>(
+/// Ingot-only callable primitive. It may forward effects for controlled
+/// instrumentation, so it is deliberately not a public certification API.
+pub(ingot) fn check_u256_with_callable<P: Fn(u256) -> PropertyVerdict>(
     _ strategy: U256Range,
     _ master_seed: u256,
     _ config: RunConfig,
@@ -183,16 +252,11 @@ pub fn check_u256<P: Fn(u256) -> PropertyVerdict>(
 ) -> RunOutcome<u256>
 uses P::E
 {
-    if config.format_version != 1 || config.codec_version != 1 {
-        return configuration_error(
-            ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.format_version },
-        )
-    }
-    if config.max_attempts > MAX_ATTEMPTS_V1
-        || config.max_shrink_evaluations > MAX_SHRINK_EVALUATIONS_V1 {
-        return configuration_error(
-            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_attempts },
-        )
+    match validate_run_config(config) {
+        Option::Some(error) => {
+            return configuration_error(error)
+        },
+        Option::None => {},
     }
     match strategy.validate() {
         Option::Some(error) => {
@@ -208,10 +272,6 @@ uses P::E
 
     let generation = generation_fingerprint(u256_strategy_fingerprint(strategy))
     while stats.valid_cases < config.target_valid_cases {
-        if stats.attempts >= config.max_attempts {
-            return RunOutcome::Exhausted { reason: ExhaustionReason::MaxAttempts, stats }
-        }
-
         let value = match generate_u256_attempt(strategy, master_seed, generation, stats.attempts) {
             GenerationResult::Value(value) => value,
             GenerationResult::InfrastructureError(error) => {
@@ -233,7 +293,7 @@ uses P::E
                 return RunOutcome::InfrastructureError { error, stats }
             },
             PropertyVerdict::Fail(failure) => {
-                match shrink_u256(
+                match shrink_u256_prevalidated(
                     strategy,
                     value,
                     failure,
@@ -261,4 +321,19 @@ uses P::E
     }
 
     RunOutcome::Passed { stats }
+}
+
+/// Deterministic runner whose public type excludes effectful properties.
+pub fn check_u256_pure<P: PureU256Property>(
+    _ strategy: U256Range,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> RunOutcome<u256> {
+    check_u256_with_callable(
+        strategy,
+        master_seed,
+        config,
+        PureU256Callable { property },
+    )
 }

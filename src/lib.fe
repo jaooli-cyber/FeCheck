@@ -1,4 +1,7 @@
 pub use action_seq::*
+pub use bool_strategy::*
+pub use capsule::*
+pub use codec::*
 pub use outcome::*
 pub use pure_runner::*
 pub use replay::*

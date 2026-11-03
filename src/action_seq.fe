@@ -3,8 +3,7 @@ use std::evm::keccak_words
 
 pub const ERROR_INVALID_ACTION_SEQUENCE: u256 = 100
 
-const DOMAIN_VALUE_V1: u256 = 0x4645434845434b2f56414c55452f563100000000000000000000000000000000
-const TYPE_ACTION_SEQ_U256_V1: u256 = 0x4645434845434b2f414354494f4e5345512f553235362f563100000000000000
+const DOMAIN_ACTION_SEQ_SPIKE_V0: u256 = 0x4645434845434b2f5350494b452f414354494f4e5345512f5630000000000000
 
 pub struct ActionSeq<A, const N: usize> { pub items: [A; N], pub len: usize }
 
@@ -19,8 +18,9 @@ where A: Copy
     sequence.len <= max_actions && max_actions <= N
 }
 
-/// Canonical V1 logical digest. Capacity and physical tail are excluded.
-pub fn action_seq_u256_digest<const N: usize>(_ sequence: ActionSeq<u256, N>) -> Result<
+/// Non-wire feasibility spike. It proves logical tail independence but is not
+/// the canonical replay codec; the stateful ActionSeq codec remains pending.
+pub fn action_seq_u256_digest_spike<const N: usize>(_ sequence: ActionSeq<u256, N>) -> Result<
     ErrorCode,
     u256,
 > {
@@ -30,9 +30,7 @@ pub fn action_seq_u256_digest<const N: usize>(_ sequence: ActionSeq<u256, N>) ->
         )
     }
 
-    var digest = keccak_words(
-        [DOMAIN_VALUE_V1, 3, 1, TYPE_ACTION_SEQ_U256_V1, 2, sequence.len as u256, 3],
-    )
+    var digest = keccak_words([DOMAIN_ACTION_SEQ_SPIKE_V0, sequence.len as u256])
     var index: usize = 0
     while index < sequence.len {
         digest = keccak_words([digest, index as u256, sequence.items[index]])

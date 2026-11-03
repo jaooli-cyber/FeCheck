@@ -10,9 +10,12 @@ created during the Fe Builders Challenge window.
 
 Before the contest window, the author performed project selection, feasibility
 research, design work, pseudocode planning, risk analysis, and Red Team review.
-Those materials are retained outside this repository as a read-only planning
-record. They were not copied into this repository and are not claimed as work
+That record was completed through 2026-11-02 and frozen before the contest
+window. The materials are retained outside this repository as read-only
+planning. They were not copied into this repository and are not claimed as work
 performed during the competition.
+They informed design decisions in the contest implementation; no pre-contest
+source code, tests, fixtures, scripts, or generated artifacts were imported.
 
 ## Reuse
 

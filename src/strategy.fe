@@ -1,3 +1,9 @@
+use super::codec::{
+    canonical_strategy_fingerprint,
+    canonical_value_digest,
+    ordered_edges_descriptor,
+    u256_bounds_descriptor,
+}
 use super::outcome::ErrorCode
 use super::scalar::{
     ScalarShrinkCursor,
@@ -6,7 +12,6 @@ use super::scalar::{
     scalar_shrink_next,
     scalar_shrink_start,
 }
-use std::evm::keccak_words
 use std::evm::random::Rng
 
 pub const MAX_RNG_REJECTIONS_V1: u256 = 64
@@ -14,9 +19,11 @@ pub const ERROR_INVALID_RANGE: u256 = 1
 pub const ERROR_ORIGIN_OUT_OF_DOMAIN: u256 = 2
 pub const ERROR_REJECTION_LIMIT: u256 = 3
 pub const ERROR_VALUE_OUT_OF_DOMAIN: u256 = 4
-
-const DOMAIN_STRATEGY_V1: u256 = 0x4645434845434b2f53545241544547592f563100000000000000000000000000
-const DOMAIN_VALUE_V1: u256 = 0x4645434845434b2f56414c55452f563100000000000000000000000000000000
+pub const STRATEGY_KIND_U256_RANGE_V1: u256 = 1
+pub const EDGE_ENUMERATION_POLICY_V1: u256 = 1
+pub const SHRINK_ENUMERATION_POLICY_V1: u256 = 1
+pub const VALUE_ENCODING_VERSION_V1: u256 = 1
+const DESCRIPTOR_NONE: u256 = 0
 
 pub enum GenerationResult<T> {
     Value(T),
@@ -112,20 +119,28 @@ impl Strategy for U256Range {
     }
 
     fn fingerprint(self) -> u256 {
-        keccak_words(
-            [
-                DOMAIN_STRATEGY_V1,
-                5,
-                1,
-                self.lo,
-                2,
-                self.hi,
-                3,
-                self.origin,
-                4,
-                MAX_RNG_REJECTIONS_V1,
-                5,
-            ],
+        var edge_count: u256 = 1
+        var edge1: u256 = 0
+        var edge2: u256 = 0
+        if self.hi > self.lo {
+            edge_count = 2
+            edge1 = self.lo + 1
+            if self.hi != edge1 {
+                edge_count = 3
+                edge2 = self.hi
+            }
+        }
+        canonical_strategy_fingerprint(
+            STRATEGY_KIND_U256_RANGE_V1,
+            u256_bounds_descriptor(self.lo, self.hi),
+            self.origin,
+            DESCRIPTOR_NONE,
+            DESCRIPTOR_NONE,
+            DESCRIPTOR_NONE,
+            ordered_edges_descriptor(edge_count, self.lo, edge1, edge2),
+            EDGE_ENUMERATION_POLICY_V1,
+            SHRINK_ENUMERATION_POLICY_V1,
+            VALUE_ENCODING_VERSION_V1,
         )
     }
 
@@ -135,9 +150,7 @@ impl Strategy for U256Range {
                 ErrorCode { kind: ERROR_VALUE_OUT_OF_DOMAIN, detail: value },
             )
         }
-        Result::Ok(
-            keccak_words([DOMAIN_VALUE_V1, 2, 1, self.fingerprint(), 2, value]),
-        )
+        Result::Ok(canonical_value_digest(self.fingerprint(), value))
     }
 
     fn random(self) -> GenerationResult<u256> uses E {

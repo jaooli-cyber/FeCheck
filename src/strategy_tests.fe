@@ -64,7 +64,7 @@ fn scalar_strategy_forwards_rng_and_handles_full_domain() {
 }
 
 #[test]
-fn bounded_generation_is_unbiased_and_has_a_hard_cap() {
+fn bounded_generation_uses_rejection_sampling_and_has_a_hard_cap() {
     let range = U256Range { lo: 0, hi: 2, origin: 0 }
     var replay = ReplayRng::new([0, 5])
     let value = with (Rng = replay) {
@@ -131,5 +131,40 @@ fn scalar_strategy_candidates_are_in_domain_and_strict_for_small_domains() {
             value += 1
         }
         origin += 1
+    }
+}
+
+#[test]
+fn top_of_u256_singleton_and_two_value_range_do_not_overflow() {
+    let max = u256::max()
+    let singleton = U256Range { lo: max, hi: max, origin: max }
+    var untouched = ReplayRng::new([17])
+    let singleton_value = with (Rng = untouched) {
+        expect_generated(generate(singleton))
+    }
+    assert!(singleton_value == max)
+    assert!(untouched.next() == 17)
+
+    let top = U256Range { lo: max - 1, hi: max, origin: max - 1 }
+    var replay = ReplayRng::new([0, 1])
+    let low = with (Rng = replay) {
+        expect_generated(generate(top))
+    }
+    let high = with (Rng = replay) {
+        expect_generated(generate(top))
+    }
+    assert!(low == max - 1)
+    assert!(high == max)
+
+    let cursor = expect_cursor(top.shrink_start(max), max - 1)
+    match top.shrink_next(cursor) {
+        ingot::StrategyShrinkStep::Candidate { value, cursor: next } => {
+            assert!(value == max - 1)
+            match top.shrink_next(next) {
+                ingot::StrategyShrinkStep::Done => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
     }
 }

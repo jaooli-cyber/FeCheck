@@ -1,0 +1,165 @@
+use ingot::{
+    BoolShrinkCursor,
+    BoolStrategy,
+    EDGE_ENUMERATION_POLICY_V1,
+    ErrorCode,
+    GenerationResult,
+    SHRINK_ENUMERATION_POLICY_V1,
+    STRATEGY_KIND_BOOL_V1,
+    Strategy,
+    StrategyShrinkStep,
+    VALUE_ENCODING_VERSION_V1,
+    canonical_strategy_fingerprint,
+    generate,
+    ordered_edges_descriptor,
+}
+use std::evm::random::{KeccakRng, ReplayRng, Rng}
+
+const BOOL_FALSE_STRATEGY_GOLDEN: u256 = 0x35204e01a91359abdfa1c9f57d3cd82411e879ba2130f60f97cef3965bd16df6
+const BOOL_TRUE_STRATEGY_GOLDEN: u256 = 0x3a0d0e05981ab502bee9deff3100349dca9c3a762c9a4b334f5cf0249b52ceb4
+
+fn expect_bool(_ result: GenerationResult<bool>) -> bool {
+    match result {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            false
+        },
+    }
+}
+
+fn expect_cursor(_ result: Result<ErrorCode, BoolShrinkCursor>) -> BoolShrinkCursor {
+    match result {
+        Result::Ok(cursor) => cursor,
+        Result::Err(_) => {
+            assert!(false)
+            let strategy = BoolStrategy { origin: false }
+            match strategy.shrink_start(false) {
+                Result::Ok(cursor) => cursor,
+                Result::Err(_) => core::panic(),
+            }
+        },
+    }
+}
+
+fn expect_word(_ result: Result<ErrorCode, u256>) -> u256 {
+    match result {
+        Result::Ok(value) => value,
+        Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn bool_strategy_identity_and_rank_are_canonical() {
+    let false_origin = BoolStrategy { origin: false }
+    let true_origin = BoolStrategy { origin: true }
+
+    assert!(false_origin.validate().is_none())
+    assert!(false_origin.contains(false))
+    assert!(false_origin.contains(true))
+    assert!(expect_word(false_origin.rank(false)) == 0)
+    assert!(expect_word(false_origin.rank(true)) == 1)
+    assert!(expect_word(true_origin.rank(true)) == 0)
+    assert!(expect_word(true_origin.rank(false)) == 1)
+
+    let edges = ordered_edges_descriptor(2, 0, 1, 0)
+    let expected_false = canonical_strategy_fingerprint(
+        STRATEGY_KIND_BOOL_V1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        edges,
+        EDGE_ENUMERATION_POLICY_V1,
+        SHRINK_ENUMERATION_POLICY_V1,
+        VALUE_ENCODING_VERSION_V1,
+    )
+    let expected_true = canonical_strategy_fingerprint(
+        STRATEGY_KIND_BOOL_V1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        edges,
+        EDGE_ENUMERATION_POLICY_V1,
+        SHRINK_ENUMERATION_POLICY_V1,
+        VALUE_ENCODING_VERSION_V1,
+    )
+    assert!(false_origin.fingerprint() == expected_false)
+    assert!(true_origin.fingerprint() == expected_true)
+    assert!(expected_false == BOOL_FALSE_STRATEGY_GOLDEN)
+    assert!(expected_true == BOOL_TRUE_STRATEGY_GOLDEN)
+    assert!(expected_false != expected_true)
+    assert!(
+        expect_word(false_origin.digest(false)) != expect_word(false_origin.digest(true)),
+    )
+    assert!(
+        expect_word(false_origin.digest(false)) != expect_word(true_origin.digest(false)),
+    )
+}
+
+#[test]
+fn bool_shrink_is_strict_and_finishes_at_origin() {
+    let to_false = BoolStrategy { origin: false }
+    let cursor = expect_cursor(to_false.shrink_start(true))
+    match to_false.shrink_next(cursor) {
+        StrategyShrinkStep::Candidate { value, cursor: next } => {
+            assert!(!value)
+            assert!(
+                expect_word(to_false.rank(value)) < expect_word(to_false.rank(true)),
+            )
+            match to_false.shrink_next(next) {
+                StrategyShrinkStep::Done => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let at_origin = expect_cursor(to_false.shrink_start(false))
+    match to_false.shrink_next(at_origin) {
+        StrategyShrinkStep::Done => {},
+        _ => assert!(false),
+    }
+
+    let to_true = BoolStrategy { origin: true }
+    let cursor = expect_cursor(to_true.shrink_start(false))
+    match to_true.shrink_next(cursor) {
+        StrategyShrinkStep::Candidate { value, cursor: next } => {
+            assert!(value)
+            match to_true.shrink_next(next) {
+                StrategyShrinkStep::Done => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn bool_generation_consumes_one_word_and_is_seed_deterministic() {
+    let strategy = BoolStrategy { origin: false }
+
+    var replay = ReplayRng::new([2, 3])
+    let generated = with (Rng = replay) {
+        expect_bool(generate(strategy))
+    }
+    assert!(!generated)
+    assert!(replay.next() == 3)
+
+    var first = KeccakRng::seeded(0x1234)
+    var second = KeccakRng::seeded(0x1234)
+    let left = with (Rng = first) {
+        expect_bool(generate(strategy))
+    }
+    let right = with (Rng = second) {
+        expect_bool(generate(strategy))
+    }
+    assert!(left == right)
+    assert!(first.next() == second.next())
+}

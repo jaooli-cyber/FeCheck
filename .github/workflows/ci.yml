@@ -30,3 +30,13 @@ jobs:
       - run: fe fmt --check
       - run: fe check . --profile dev
       - run: fe test . --backend sonatina --profile test -O 1 --jobs 1
+      - name: Verify independent Keccak oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/oracle"
+          "$RUNNER_TEMP/oracle/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            -r tools/requirements-oracle-ci.txt
+          "$RUNNER_TEMP/oracle/bin/python" tools/oracle_vectors.py

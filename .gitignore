@@ -2,4 +2,7 @@ out/
 target/
 *.tar.gz
 *.tmp
+__pycache__/
+*.pyc
+.venv-oracle/
 .DS_Store

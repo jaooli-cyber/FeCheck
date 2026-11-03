@@ -1,0 +1,377 @@
+use super::outcome::{
+    ErrorCode,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::pure_runner::{
+    PureU256Callable,
+    PureU256Property,
+    U256ShrinkResult,
+    check_u256_pure,
+    shrink_u256_prevalidated,
+    validate_run_config,
+}
+use super::replay::{
+    CAPSULE_FORMAT_VERSION_V1,
+    GENERATION_ALGORITHM_VERSION_V1,
+    GENERATION_EDGE_POLICY_VERSION_V1,
+    RunConfig,
+    attempt_seed,
+    generate_u256_attempt,
+    generation_fingerprint,
+    run_fingerprint,
+    u256_strategy_fingerprint,
+    value_digest,
+}
+use super::strategy::{GenerationResult, Strategy, U256Range}
+
+pub const ERROR_REPLAY_CAPSULE_FORMAT: u256 = 400
+pub const ERROR_REPLAY_ALGORITHM_VERSION: u256 = 401
+pub const ERROR_REPLAY_EDGE_POLICY_VERSION: u256 = 402
+pub const ERROR_REPLAY_SUITE: u256 = 403
+pub const ERROR_REPLAY_NAMESPACE: u256 = 404
+pub const ERROR_REPLAY_GENERATION_FINGERPRINT: u256 = 405
+pub const ERROR_REPLAY_RUN_FINGERPRINT: u256 = 406
+pub const ERROR_REPLAY_FLAGS: u256 = 407
+pub const ERROR_REPLAY_ATTEMPT_IDENTITY: u256 = 408
+pub const ERROR_REPLAY_RUN_STATS: u256 = 409
+
+pub const EVIDENCE_REDUCED_DIGEST: u256 = 1
+pub const EVIDENCE_SHRINK_STATS: u256 = 2
+pub const EVIDENCE_SHRINK_STATUS: u256 = 3
+
+pub struct U256ReplayCapsule {
+    pub format_version: u256,
+    pub algorithm_version: u256,
+    pub edge_policy_version: u256,
+    pub suite_id: u256,
+    pub run_namespace: u256,
+    pub master_seed: u256,
+    pub attempt_index: u256,
+    pub attempt_identity: u256,
+    pub generation_fingerprint: u256,
+    pub run_fingerprint: u256,
+    pub failure_key: FailureKey,
+    pub flags: u256,
+    pub original_digest: u256,
+    pub reduced_digest: u256,
+    pub run_stats: RunStats,
+    pub shrink_stats: ShrinkStats,
+    pub shrink_status: ShrinkStatus,
+}
+
+impl Copy for U256ReplayCapsule {}
+
+pub struct U256RunReport { pub outcome: RunOutcome<u256>, pub capsule: Option<U256ReplayCapsule> }
+
+impl Copy for U256RunReport {}
+
+pub enum U256ReplayOutcome {
+    Incompatible { pub error: ErrorCode },
+    ConfigurationError { pub error: ErrorCode },
+    OriginalDigestMismatch {
+        pub expected: u256,
+        pub observed: u256,
+    },
+    FailureNotObserved,
+    ReplayInputDiscarded,
+    ReplayInfrastructureError { pub error: ErrorCode },
+    FailureKeyMismatch {
+        pub expected: FailureKey,
+        pub observed: FailureKey,
+    },
+    ShrinkEvidenceMismatch { pub field: u256 },
+    Reproduced {
+        pub original: u256,
+        pub minimal: u256,
+        pub shrink: ShrinkStats,
+        pub shrink_status: ShrinkStatus,
+    },
+}
+
+impl Copy for U256ReplayOutcome {}
+
+fn shrink_stats_equal(_ left: ShrinkStats, _ right: ShrinkStats) -> bool {
+    left.evaluations == right.evaluations
+        && left.accepted == right.accepted
+        && left.rejected_pass == right.rejected_pass
+        && left.rejected_discard == right.rejected_discard
+        && left.rejected_failure_key == right.rejected_failure_key
+}
+
+fn shrink_status_equal(_ left: ShrinkStatus, _ right: ShrinkStatus) -> bool {
+    match left {
+        ShrinkStatus::CompleteLocal => {
+            match right {
+                ShrinkStatus::CompleteLocal => true,
+                ShrinkStatus::PartialBudget => false,
+            }
+        },
+        ShrinkStatus::PartialBudget => {
+            match right {
+                ShrinkStatus::CompleteLocal => false,
+                ShrinkStatus::PartialBudget => true,
+            }
+        },
+    }
+}
+
+/// Runs a referentially transparent property and attaches replay evidence only
+/// when the run is falsified.
+pub fn check_u256_certified<P: PureU256Property>(
+    _ strategy: U256Range,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> U256RunReport {
+    let outcome = check_u256_pure(strategy, master_seed, config, property)
+    var capsule: Option<U256ReplayCapsule> = Option::None
+
+    match outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            let strategy_fp = u256_strategy_fingerprint(strategy)
+            let generation = generation_fingerprint(strategy_fp)
+            let run_fp = run_fingerprint(generation, config)
+            capsule = Option::Some(
+                U256ReplayCapsule {
+                    format_version: CAPSULE_FORMAT_VERSION_V1,
+                    algorithm_version: GENERATION_ALGORITHM_VERSION_V1,
+                    edge_policy_version: GENERATION_EDGE_POLICY_VERSION_V1,
+                    suite_id: config.suite_id,
+                    run_namespace: config.namespace,
+                    master_seed,
+                    attempt_index: stats.attempts - 1,
+                    attempt_identity: attempt_seed(master_seed, stats.attempts - 1, generation),
+                    generation_fingerprint: generation,
+                    run_fingerprint: run_fp,
+                    failure_key: failure,
+                    flags: 0,
+                    original_digest: value_digest(strategy_fp, original),
+                    reduced_digest: value_digest(strategy_fp, minimal),
+                    run_stats: stats,
+                    shrink_stats: shrink,
+                    shrink_status,
+                },
+            )
+        },
+        _ => {},
+    }
+
+    U256RunReport { outcome, capsule }
+}
+
+fn incompatible(_ kind: u256, _ detail: u256) -> U256ReplayOutcome {
+    U256ReplayOutcome::Incompatible { error: ErrorCode { kind, detail } }
+}
+
+fn replay_run_stats_error(_ config: RunConfig, _ capsule: U256ReplayCapsule) -> Option<ErrorCode> {
+    let run = capsule.run_stats
+    let shrink = capsule.shrink_stats
+    if config.target_valid_cases == 0 {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 0 })
+    }
+    let attempt_limit = config.target_valid_cases + config.max_discards
+
+    if run.attempts == 0 || run.attempts > attempt_limit {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 1 })
+    }
+    if capsule.attempt_index != run.attempts - 1 {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 2 })
+    }
+    if run.valid_cases >= config.target_valid_cases {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 3 })
+    }
+    if run.discards > config.max_discards {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 4 })
+    }
+    if run.attempts != run.valid_cases + run.discards + 1 {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 5 })
+    }
+    if capsule.attempt_index >= attempt_limit {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 6 })
+    }
+    if shrink.evaluations > config.max_shrink_evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 7 })
+    }
+    if shrink.accepted > shrink.evaluations
+        || shrink.rejected_pass > shrink.evaluations
+        || shrink.rejected_discard > shrink.evaluations
+        || shrink.rejected_failure_key > shrink.evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 8 })
+    }
+    let shrink_total = shrink.accepted
+        + shrink.rejected_pass
+        + shrink.rejected_discard
+        + shrink.rejected_failure_key
+    if shrink_total != shrink.evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 9 })
+    }
+    if run.property_evaluations != run.attempts + shrink.evaluations {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 10 })
+    }
+    if run.state_evaluations != 0
+        || run.fixture_evaluations != 0
+        || run.contract_deployments != 0
+        || run.actions_executed != 0 {
+        return Option::Some(ErrorCode { kind: ERROR_REPLAY_RUN_STATS, detail: 11 })
+    }
+    Option::None
+}
+/// Ingot-only callable replay primitive used for prefix/counter instrumentation.
+/// It never evaluates attempts preceding `capsule.attempt_index` and is not
+/// the public certification boundary.
+pub(ingot) fn replay_u256_capsule_with_callable<P: Fn(u256) -> PropertyVerdict>(
+    _ strategy: U256Range,
+    _ config: RunConfig,
+    _ capsule: U256ReplayCapsule,
+    _ property: P,
+) -> U256ReplayOutcome
+uses P::E
+{
+    if capsule.format_version != CAPSULE_FORMAT_VERSION_V1 {
+        return incompatible(ERROR_REPLAY_CAPSULE_FORMAT, capsule.format_version)
+    }
+    if capsule.algorithm_version != GENERATION_ALGORITHM_VERSION_V1 {
+        return incompatible(ERROR_REPLAY_ALGORITHM_VERSION, capsule.algorithm_version)
+    }
+    if capsule.edge_policy_version != GENERATION_EDGE_POLICY_VERSION_V1 {
+        return incompatible(
+            ERROR_REPLAY_EDGE_POLICY_VERSION,
+            capsule.edge_policy_version,
+        )
+    }
+    match validate_run_config(config) {
+        Option::Some(error) => {
+            return U256ReplayOutcome::ConfigurationError { error }
+        },
+        Option::None => {},
+    }
+    match strategy.validate() {
+        Option::Some(error) => {
+            return U256ReplayOutcome::ConfigurationError { error }
+        },
+        Option::None => {},
+    }
+    if capsule.suite_id != config.suite_id {
+        return incompatible(ERROR_REPLAY_SUITE, capsule.suite_id)
+    }
+    if capsule.run_namespace != config.namespace {
+        return incompatible(ERROR_REPLAY_NAMESPACE, capsule.run_namespace)
+    }
+    if capsule.flags != 0 {
+        return incompatible(ERROR_REPLAY_FLAGS, capsule.flags)
+    }
+
+    let strategy_fp = u256_strategy_fingerprint(strategy)
+    let expected_generation = generation_fingerprint(strategy_fp)
+    if capsule.generation_fingerprint != expected_generation {
+        return incompatible(
+            ERROR_REPLAY_GENERATION_FINGERPRINT,
+            capsule.generation_fingerprint,
+        )
+    }
+    let expected_run = run_fingerprint(expected_generation, config)
+    if capsule.run_fingerprint != expected_run {
+        return incompatible(ERROR_REPLAY_RUN_FINGERPRINT, capsule.run_fingerprint)
+    }
+    let expected_attempt_identity = attempt_seed(
+        capsule.master_seed,
+        capsule.attempt_index,
+        expected_generation,
+    )
+    if capsule.attempt_identity != expected_attempt_identity {
+        return incompatible(ERROR_REPLAY_ATTEMPT_IDENTITY, capsule.attempt_identity)
+    }
+    match replay_run_stats_error(config, capsule) {
+        Option::Some(error) => {
+            return U256ReplayOutcome::Incompatible { error }
+        },
+        Option::None => {},
+    }
+
+    let original = match generate_u256_attempt(
+        strategy,
+        capsule.master_seed,
+        expected_generation,
+        capsule.attempt_index,
+    ) {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(error) => {
+            return U256ReplayOutcome::ReplayInfrastructureError { error }
+        },
+    }
+    let observed_original_digest = value_digest(strategy_fp, original)
+    if observed_original_digest != capsule.original_digest {
+        return U256ReplayOutcome::OriginalDigestMismatch {
+            expected: capsule.original_digest,
+            observed: observed_original_digest,
+        }
+    }
+
+    match property(original) {
+        PropertyVerdict::Pass => U256ReplayOutcome::FailureNotObserved,
+        PropertyVerdict::Discard => U256ReplayOutcome::ReplayInputDiscarded,
+        PropertyVerdict::InfrastructureError(error) => {
+            U256ReplayOutcome::ReplayInfrastructureError { error }
+        },
+        PropertyVerdict::Fail(observed_failure) => {
+            if !failure_key_equal(observed_failure, capsule.failure_key) {
+                return U256ReplayOutcome::FailureKeyMismatch {
+                    expected: capsule.failure_key,
+                    observed: observed_failure,
+                }
+            }
+
+            match shrink_u256_prevalidated(
+                strategy,
+                original,
+                capsule.failure_key,
+                config.max_shrink_evaluations,
+                property,
+            ) {
+                U256ShrinkResult::InfrastructureError { error, stats: _ } => {
+                    U256ReplayOutcome::ReplayInfrastructureError { error }
+                },
+                U256ShrinkResult::Complete { minimal, stats, status } => {
+                    let observed_reduced_digest = value_digest(strategy_fp, minimal)
+                    if observed_reduced_digest != capsule.reduced_digest {
+                        return U256ReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_REDUCED_DIGEST,
+                        }
+                    }
+                    if !shrink_stats_equal(stats, capsule.shrink_stats) {
+                        return U256ReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_SHRINK_STATS,
+                        }
+                    }
+                    if !shrink_status_equal(status, capsule.shrink_status) {
+                        return U256ReplayOutcome::ShrinkEvidenceMismatch {
+                            field: EVIDENCE_SHRINK_STATUS,
+                        }
+                    }
+                    U256ReplayOutcome::Reproduced {
+                        original,
+                        minimal,
+                        shrink: stats,
+                        shrink_status: status,
+                    }
+                },
+            }
+        },
+    }
+}
+
+/// Public replay accepts only a property whose type proves the effect row is empty.
+pub fn replay_u256_capsule<P: PureU256Property>(
+    _ strategy: U256Range,
+    _ config: RunConfig,
+    _ capsule: U256ReplayCapsule,
+    _ property: P,
+) -> U256ReplayOutcome {
+    replay_u256_capsule_with_callable(strategy, config, capsule, PureU256Callable { property })
+}

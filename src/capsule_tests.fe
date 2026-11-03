@@ -1,0 +1,568 @@
+use ingot::{
+    ERROR_INVALID_RANGE,
+    ERROR_LIMIT_TOO_LARGE,
+    ERROR_REPLAY_ALGORITHM_VERSION,
+    ERROR_REPLAY_ATTEMPT_IDENTITY,
+    ERROR_REPLAY_CAPSULE_FORMAT,
+    ERROR_REPLAY_EDGE_POLICY_VERSION,
+    ERROR_REPLAY_GENERATION_FINGERPRINT,
+    ERROR_REPLAY_RUN_FINGERPRINT,
+    ERROR_REPLAY_RUN_STATS,
+    ERROR_REPLAY_SUITE,
+    EVIDENCE_REDUCED_DIGEST,
+    EVIDENCE_SHRINK_STATS,
+    EVIDENCE_SHRINK_STATUS,
+    ErrorCode,
+    FailureKey,
+    PureU256Property,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    ShrinkStatus,
+    U256Range,
+    U256ReplayCapsule,
+    U256ReplayOutcome,
+    U256RunReport,
+    check_u256_certified,
+    replay_u256_capsule,
+    replay_u256_capsule_with_callable,
+    run_fingerprint,
+    u256_codec_fingerprint,
+}
+
+struct EvalCounter { count: u256 }
+
+fn config() -> RunConfig {
+    RunConfig {
+        suite_id: 11,
+        namespace: 22,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: u256_codec_fingerprint(),
+    }
+}
+
+fn fail_at_ten(_ value: u256) -> PropertyVerdict {
+    if value >= 10 {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+fn counted_fail_at_ten(_ value: u256) -> PropertyVerdict
+uses (counter: mut EvalCounter)
+{
+    counter.count += 1
+    fail_at_ten(value)
+}
+
+fn always_pass(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::Pass
+}
+
+fn always_discard(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::Discard
+}
+
+fn different_failure(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::Fail(FailureKey { kind: 6, detail: 9 })
+}
+
+fn infrastructure(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::InfrastructureError(ErrorCode { kind: 999, detail: value })
+}
+
+struct FailAtTenProperty {}
+impl Copy for FailAtTenProperty {}
+impl PureU256Property for FailAtTenProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        fail_at_ten(value)
+    }
+}
+
+struct AlwaysPassProperty {}
+impl Copy for AlwaysPassProperty {}
+impl PureU256Property for AlwaysPassProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        always_pass(value)
+    }
+}
+
+struct AlwaysDiscardProperty {}
+impl Copy for AlwaysDiscardProperty {}
+impl PureU256Property for AlwaysDiscardProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        always_discard(value)
+    }
+}
+
+struct DifferentFailureProperty {}
+impl Copy for DifferentFailureProperty {}
+impl PureU256Property for DifferentFailureProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        different_failure(value)
+    }
+}
+
+struct InfrastructureProperty {}
+impl Copy for InfrastructureProperty {}
+impl PureU256Property for InfrastructureProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        infrastructure(value)
+    }
+}
+
+fn expect_capsule(_ report: U256RunReport) -> U256ReplayCapsule {
+    match report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            U256ReplayCapsule {
+                format_version: 0,
+                algorithm_version: 0,
+                edge_policy_version: 0,
+                suite_id: 0,
+                run_namespace: 0,
+                master_seed: 0,
+                attempt_index: 0,
+                attempt_identity: 0,
+                generation_fingerprint: 0,
+                run_fingerprint: 0,
+                failure_key: FailureKey { kind: 0, detail: 0 },
+                flags: 0,
+                original_digest: 0,
+                reduced_digest: 0,
+                run_stats: ingot::empty_run_stats(),
+                shrink_stats: ingot::empty_shrink_stats(),
+                shrink_status: ShrinkStatus::PartialBudget,
+            }
+        },
+    }
+}
+
+fn failure_capsule() -> U256ReplayCapsule {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    expect_capsule(
+        check_u256_certified(strategy, 7, config(), FailAtTenProperty {}),
+    )
+}
+
+fn incompatible_kind(_ outcome: U256ReplayOutcome) -> u256 {
+    match outcome {
+        U256ReplayOutcome::Incompatible { error } => error.kind,
+        _ => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn configuration_kind(_ outcome: U256ReplayOutcome) -> u256 {
+    match outcome {
+        U256ReplayOutcome::ConfigurationError { error } => error.kind,
+        _ => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn certified_run_replays_without_executing_the_prefix() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let report = check_u256_certified(strategy, 7, config(), FailAtTenProperty {})
+    match report.outcome {
+        RunOutcome::Falsified {
+            original,
+            minimal,
+            failure: _,
+            stats,
+            shrink: _,
+            shrink_status: _,
+        } => {
+            assert!(original == 100)
+            assert!(minimal == 10)
+            assert!(stats.attempts == 3)
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_capsule(report)
+    assert!(capsule.attempt_index == 2)
+    assert!(capsule.run_stats.attempts == 3)
+
+    var counter = EvalCounter { count: 0 }
+    let replayed = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), capsule, counted_fail_at_ten)
+    }
+    match replayed {
+        U256ReplayOutcome::Reproduced { original, minimal, shrink, shrink_status } => {
+            assert!(original == 100)
+            assert!(minimal == 10)
+            assert!(shrink.evaluations == capsule.shrink_stats.evaluations)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(counter.count == 1 + capsule.shrink_stats.evaluations)
+}
+
+#[test]
+fn incompatible_capsules_are_rejected_before_property_evaluation() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let capsule = failure_capsule()
+
+    var bad_format = capsule
+    bad_format.format_version = 2
+    var counter = EvalCounter { count: 0 }
+    let format_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_format, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(format_result) == ERROR_REPLAY_CAPSULE_FORMAT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_suite = capsule
+    bad_suite.suite_id = 12
+    counter.count = 0
+    let suite_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_suite, counted_fail_at_ten)
+    }
+    assert!(incompatible_kind(suite_result) == ERROR_REPLAY_SUITE)
+    assert!(counter.count == 0)
+
+    var bad_generation = capsule
+    bad_generation.generation_fingerprint = 0
+    counter.count = 0
+    let generation_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_generation, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(generation_result) == ERROR_REPLAY_GENERATION_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_run = capsule
+    bad_run.run_fingerprint = 0
+    counter.count = 0
+    let run_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_run, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(run_result) == ERROR_REPLAY_RUN_FINGERPRINT,
+    )
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn replay_classifies_changed_property_results() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let capsule = failure_capsule()
+
+    match replay_u256_capsule(strategy, config(), capsule, AlwaysPassProperty {}) {
+        U256ReplayOutcome::FailureNotObserved => {},
+        _ => assert!(false),
+    }
+    match replay_u256_capsule(strategy, config(), capsule, AlwaysDiscardProperty {}) {
+        U256ReplayOutcome::ReplayInputDiscarded => {},
+        _ => assert!(false),
+    }
+    match replay_u256_capsule(strategy, config(), capsule, DifferentFailureProperty {}) {
+        U256ReplayOutcome::FailureKeyMismatch { expected, observed } => {
+            assert!(expected.kind == 5)
+            assert!(observed.kind == 6)
+        },
+        _ => assert!(false),
+    }
+    match replay_u256_capsule(strategy, config(), capsule, InfrastructureProperty {}) {
+        U256ReplayOutcome::ReplayInfrastructureError { error } => {
+            assert!(error.kind == 999)
+            assert!(error.detail == 100)
+        },
+        _ => assert!(false),
+    }
+
+    let passed = check_u256_certified(strategy, 7, config(), AlwaysPassProperty {})
+    assert!(passed.capsule.is_none())
+}
+
+#[test]
+fn replay_detects_original_and_shrink_evidence_tampering() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let capsule = failure_capsule()
+
+    var bad_original = capsule
+    bad_original.original_digest = 0
+    match replay_u256_capsule(strategy, config(), bad_original, FailAtTenProperty {}) {
+        U256ReplayOutcome::OriginalDigestMismatch { expected, observed } => {
+            assert!(expected == 0)
+            assert!(observed == capsule.original_digest)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_reduced = capsule
+    bad_reduced.reduced_digest = 0
+    match replay_u256_capsule(strategy, config(), bad_reduced, FailAtTenProperty {}) {
+        U256ReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_REDUCED_DIGEST)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_stats = capsule
+    bad_stats.shrink_stats.accepted += 1
+    bad_stats.shrink_stats.rejected_pass -= 1
+    match replay_u256_capsule(strategy, config(), bad_stats, FailAtTenProperty {}) {
+        U256ReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_SHRINK_STATS)
+        },
+        _ => assert!(false),
+    }
+
+    var bad_status = capsule
+    bad_status.shrink_status = ShrinkStatus::PartialBudget
+    match replay_u256_capsule(strategy, config(), bad_status, FailAtTenProperty {}) {
+        U256ReplayOutcome::ShrinkEvidenceMismatch { field } => {
+            assert!(field == EVIDENCE_SHRINK_STATUS)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn replay_commits_seed_index_and_run_stats_before_property_evaluation() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let capsule = failure_capsule()
+    var counter = EvalCounter { count: 0 }
+
+    var bad_seed = capsule
+    bad_seed.master_seed += 1
+    let seed_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_seed, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(seed_result) == ERROR_REPLAY_ATTEMPT_IDENTITY,
+    )
+    assert!(counter.count == 0)
+
+    var bad_index = capsule
+    bad_index.attempt_index -= 1
+    counter.count = 0
+    let index_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_index, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(index_result) == ERROR_REPLAY_ATTEMPT_IDENTITY,
+    )
+    assert!(counter.count == 0)
+
+    var bad_run_stats = capsule
+    bad_run_stats.run_stats.attempts += 1
+    counter.count = 0
+    let stats_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, config(), bad_run_stats, counted_fail_at_ten)
+    }
+    assert!(incompatible_kind(stats_result) == ERROR_REPLAY_RUN_STATS)
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn replay_preflight_has_stable_precedence_and_configuration_classification() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let capsule = failure_capsule()
+    var invalid_config = config()
+    invalid_config.target_valid_cases = 4096
+    invalid_config.max_discards = 1
+    var counter = EvalCounter { count: 0 }
+
+    var bad_format = capsule
+    bad_format.format_version = 2
+    let format_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, invalid_config, bad_format, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(format_result) == ERROR_REPLAY_CAPSULE_FORMAT,
+    )
+    assert!(counter.count == 0)
+
+    var bad_algorithm = capsule
+    bad_algorithm.algorithm_version = 2
+    counter.count = 0
+    let algorithm_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(
+            strategy,
+            invalid_config,
+            bad_algorithm,
+            counted_fail_at_ten,
+        )
+    }
+    assert!(
+        incompatible_kind(algorithm_result) == ERROR_REPLAY_ALGORITHM_VERSION,
+    )
+    assert!(counter.count == 0)
+
+    var bad_edge = capsule
+    bad_edge.edge_policy_version = 2
+    counter.count = 0
+    let edge_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, invalid_config, bad_edge, counted_fail_at_ten)
+    }
+    assert!(
+        incompatible_kind(edge_result) == ERROR_REPLAY_EDGE_POLICY_VERSION,
+    )
+    assert!(counter.count == 0)
+
+    var bad_suite = capsule
+    bad_suite.suite_id += 1
+    counter.count = 0
+    let config_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, invalid_config, bad_suite, counted_fail_at_ten)
+    }
+    assert!(configuration_kind(config_result) == ERROR_LIMIT_TOO_LARGE)
+    assert!(counter.count == 0)
+
+    let invalid_strategy = U256Range { lo: 10, hi: 9, origin: 10 }
+    counter.count = 0
+    let strategy_result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(
+            invalid_strategy,
+            config(),
+            bad_suite,
+            counted_fail_at_ten,
+        )
+    }
+    assert!(configuration_kind(strategy_result) == ERROR_INVALID_RANGE)
+    assert!(counter.count == 0)
+}
+
+#[test]
+fn replay_rejects_zero_target_capsule_evidence_before_property() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    var zero_config = config()
+    zero_config.target_valid_cases = 0
+    var capsule = failure_capsule()
+    capsule.run_fingerprint = run_fingerprint(capsule.generation_fingerprint, zero_config)
+    var counter = EvalCounter { count: 0 }
+    let result = with (EvalCounter = mut counter) {
+        replay_u256_capsule_with_callable(strategy, zero_config, capsule, counted_fail_at_ten)
+    }
+    assert!(incompatible_kind(result) == ERROR_REPLAY_RUN_STATS)
+    assert!(counter.count == 0)
+}
+
+fn assert_partial_budget_replays(_ budget: u256) {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    var partial_config = config()
+    partial_config.max_shrink_evaluations = budget
+    let report = check_u256_certified(strategy, 7, partial_config, FailAtTenProperty {})
+    match report.outcome {
+        RunOutcome::Falsified {
+            original: _,
+            minimal: _,
+            failure: _,
+            stats: _,
+            shrink,
+            shrink_status,
+        } => {
+            assert!(shrink.evaluations == budget)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_capsule(report)
+    match replay_u256_capsule(strategy, partial_config, capsule, FailAtTenProperty {}) {
+        U256ReplayOutcome::Reproduced { original: _, minimal: _, shrink, shrink_status } => {
+            assert!(shrink.evaluations == budget)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn partial_budget_capsules_replay_at_exact_and_single_evaluation_budgets() {
+    assert_partial_budget_replays(14)
+    assert_partial_budget_replays(1)
+}
+
+const FULL_DOMAIN_ATTEMPT_3_GOLDEN: u256 = 0x9c40dca31d0754b82d7dede45fe229a980bf7bf951fa9bebbc79d687df4b8297
+const FULL_DOMAIN_RANDOM_3_GOLDEN: u256 = 0xc69c76789ef4fa0e760883627a670a1d2d4406218dcd5f0d72124c14a221d137
+
+struct FailOnRandomBranchProperty {}
+
+impl Copy for FailOnRandomBranchProperty {}
+
+impl PureU256Property for FailOnRandomBranchProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        if value == 0 || value == 1 || value == u256::max() {
+            PropertyVerdict::Pass
+        } else {
+            PropertyVerdict::Fail(FailureKey { kind: 7, detail: 0 })
+        }
+    }
+}
+
+#[test]
+fn random_attempt_branch_is_certified_and_replayed_end_to_end() {
+    let strategy = U256Range { lo: 0, hi: u256::max(), origin: 0 }
+    var random_config = config()
+    random_config.target_valid_cases = 4
+    random_config.max_shrink_evaluations = 1
+
+    let report = check_u256_certified(strategy, 7, random_config, FailOnRandomBranchProperty {})
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure: _, stats, shrink, shrink_status } => {
+            assert!(original == FULL_DOMAIN_RANDOM_3_GOLDEN)
+            assert!(minimal == original)
+            assert!(stats.attempts == 4)
+            assert!(stats.valid_cases == 3)
+            assert!(shrink.evaluations == 1)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let capsule = expect_capsule(report)
+    assert!(capsule.attempt_index == 3)
+    assert!(capsule.run_stats.attempts == 4)
+    assert!(capsule.attempt_identity == FULL_DOMAIN_ATTEMPT_3_GOLDEN)
+
+    match replay_u256_capsule(
+        strategy,
+        random_config,
+        capsule,
+        FailOnRandomBranchProperty {},
+    ) {
+        U256ReplayOutcome::Reproduced { original, minimal, shrink, shrink_status } => {
+            assert!(original == FULL_DOMAIN_RANDOM_3_GOLDEN)
+            assert!(minimal == original)
+            assert!(shrink.evaluations == 1)
+            match shrink_status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}

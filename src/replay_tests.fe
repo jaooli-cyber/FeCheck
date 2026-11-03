@@ -1,11 +1,21 @@
 use ingot::{
+    ERROR_GENERATION_FINGERPRINT_MISMATCH,
+    ERROR_INVALID_EDGE_INDEX,
+    ERROR_INVALID_RANGE,
+    FailureKey,
     GenerationResult,
+    PropertyVerdict,
+    PureU256Property,
     RunConfig,
+    RunOutcome,
     U256Range,
     attempt_seed,
+    canonical_strategy_fingerprint,
+    check_u256_pure,
     generate_u256_attempt,
     generation_fingerprint,
     run_fingerprint,
+    u256_codec_fingerprint,
     u256_edge_at,
     u256_edge_count,
     u256_strategy_fingerprint,
@@ -22,6 +32,38 @@ fn generated_value(_ result: GenerationResult<u256>) -> u256 {
     }
 }
 
+fn replay_config(_ shrink_budget: u256) -> RunConfig {
+    RunConfig {
+        suite_id: 1,
+        namespace: 2,
+        target_valid_cases: 20,
+        max_discards: 10,
+        max_shrink_evaluations: shrink_budget,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: u256_codec_fingerprint(),
+    }
+}
+
+fn discard_pass_fail(_ value: u256) -> PropertyVerdict {
+    if value == 0 {
+        PropertyVerdict::Discard
+    } else if value == 1000 {
+        PropertyVerdict::Fail(FailureKey { kind: 7, detail: 11 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+struct DiscardPassFailProperty {}
+impl Copy for DiscardPassFailProperty {}
+impl PureU256Property for DiscardPassFailProperty {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        discard_pass_fail(value)
+    }
+}
 #[test]
 fn range_edges_are_deduplicated_and_ordered() {
     let one = U256Range { lo: 9, hi: 9, origin: 9 }
@@ -41,54 +83,78 @@ fn range_edges_are_deduplicated_and_ordered() {
 }
 
 #[test]
-fn attempt_identity_is_direct_and_independent_of_shrink_budget() {
+fn replay_generation_errors_are_distinct_and_classified() {
+    let invalid = U256Range { lo: 10, hi: 9, origin: 10 }
+    match generate_u256_attempt(invalid, 1, 0, 0) {
+        GenerationResult::InfrastructureError(error) => {
+            assert!(error.kind == ERROR_INVALID_RANGE)
+            assert!(error.detail == 10)
+        },
+        _ => assert!(false),
+    }
+
+    let valid = U256Range { lo: 0, hi: 100, origin: 0 }
+    match u256_edge_at(valid, 3) {
+        GenerationResult::InfrastructureError(error) => {
+            assert!(error.kind == ERROR_INVALID_EDGE_INDEX)
+            assert!(error.detail == 3)
+        },
+        _ => assert!(false),
+    }
+
+    let expected = generation_fingerprint(u256_strategy_fingerprint(valid))
+    match generate_u256_attempt(valid, 1, expected + 1, 3) {
+        GenerationResult::InfrastructureError(error) => {
+            assert!(error.kind == ERROR_GENERATION_FINGERPRINT_MISMATCH)
+            assert!(error.detail == expected + 1)
+        },
+        _ => assert!(false),
+    }
+
+    assert!(ERROR_INVALID_RANGE != ERROR_INVALID_EDGE_INDEX)
+    assert!(
+        ERROR_INVALID_RANGE != ERROR_GENERATION_FINGERPRINT_MISMATCH,
+    )
+    assert!(
+        ERROR_INVALID_EDGE_INDEX != ERROR_GENERATION_FINGERPRINT_MISMATCH,
+    )
+}
+#[test]
+fn runner_uses_direct_attempt_identity_after_discard_and_pass() {
     let strategy = U256Range { lo: 0, hi: 1000, origin: 0 }
     let strategy_fp = u256_strategy_fingerprint(strategy)
     let generation = generation_fingerprint(strategy_fp)
-    let direct = generated_value(generate_u256_attempt(strategy, 42, generation, 5))
+    let direct = generated_value(generate_u256_attempt(strategy, 42, generation, 2))
+    assert!(direct == 1000)
 
-    var index: u256 = 0
-    var from_full_run: u256 = 0
-    while index <= 5 {
-        let value = generated_value(generate_u256_attempt(strategy, 42, generation, index))
-        if index == 5 {
-            from_full_run = value
-        }
-        index += 1
+    let outcome = check_u256_pure(strategy, 42, replay_config(0), DiscardPassFailProperty {})
+    match outcome {
+        RunOutcome::Falsified {
+            original,
+            minimal,
+            failure: _,
+            stats,
+            shrink,
+            shrink_status: _,
+        } => {
+            assert!(original == direct)
+            assert!(minimal == direct)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 1)
+            assert!(stats.discards == 1)
+            assert!(stats.property_evaluations == 3)
+            assert!(shrink.evaluations == 0)
+        },
+        _ => assert!(false),
     }
-    assert!(direct == from_full_run)
-    assert!(
-        direct == generated_value(generate_u256_attempt(strategy, 42, generation, 5)),
-    )
 
-    let base = RunConfig {
-        suite_id: 1,
-        namespace: 2,
-        target_valid_cases: 20,
-        max_discards: 10,
-        max_attempts: 100,
-        max_shrink_evaluations: 0,
-        format_version: 1,
-        codec_version: 1,
-    }
-    let expanded = RunConfig {
-        suite_id: 1,
-        namespace: 2,
-        target_valid_cases: 20,
-        max_discards: 10,
-        max_attempts: 100,
-        max_shrink_evaluations: 100,
-        format_version: 1,
-        codec_version: 1,
-    }
+    let base = replay_config(0)
+    let expanded = replay_config(100)
     assert!(
         run_fingerprint(generation, base) != run_fingerprint(generation, expanded),
     )
     assert!(
-        attempt_seed(42, 5, generation) == attempt_seed(42, 5, generation),
-    )
-    assert!(
-        direct == generated_value(generate_u256_attempt(strategy, 42, generation, 5)),
+        attempt_seed(42, 2, generation) != attempt_seed(43, 2, generation),
     )
 }
 
@@ -113,7 +179,7 @@ fn golden_strategy_fingerprint_matches_external_keccak() {
     let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
     assert!(
         u256_strategy_fingerprint(strategy)
-            == 0x35b9ba2e0dbebe8be06a0ae08d26d5ed7cdd03e26bd8f338e0a16025c2f81ecf,
+            == 0xa59f7fb423bdfb3a522cd2fd14e1cc8e6c0f85037ae66d6db21efa3243a8a5bd,
     )
 }
 
@@ -123,7 +189,7 @@ fn golden_generation_fingerprint_matches_external_keccak() {
     let strategy_fp = u256_strategy_fingerprint(strategy)
     assert!(
         generation_fingerprint(strategy_fp)
-            == 0x0a92a7c207546705203a70895118fadcd39eb2e959f44fbc218c942743f27631,
+            == 0x867b0175a87398842d331cbc2d5d05403f60d0430fa353c269ac88b9292e9006,
     )
 }
 
@@ -133,7 +199,7 @@ fn golden_attempt_seed_matches_external_keccak() {
     let generation = generation_fingerprint(u256_strategy_fingerprint(strategy))
     assert!(
         attempt_seed(7, 3, generation)
-            == 0xaa79dffeeb49ac62734cc93f7700462fe125eb908d57fe6f72ac922c5c35043d,
+            == 0x14e91fbfb4ac893c0e9dd7bb77989bc6fd6544eccad4a5a60b5ca8344aa8e943,
     )
 }
 
@@ -143,7 +209,7 @@ fn golden_value_digest_matches_external_keccak() {
     let strategy_fp = u256_strategy_fingerprint(strategy)
     assert!(
         value_digest(strategy_fp, 12)
-            == 0xbb31de1e9bcf58154c7586dda2d25964d6275c36355320d61ba9d7aed1a549e6,
+            == 0x2440bb5729d555aa6c5e2ffb2badd479cb4b8e6e7e5f4b49f9118ea34cac5d0d,
     )
 }
 
@@ -156,13 +222,110 @@ fn golden_run_fingerprint_matches_external_keccak() {
         namespace: 2,
         target_valid_cases: 3,
         max_discards: 10,
-        max_attempts: 20,
         max_shrink_evaluations: 100,
-        format_version: 1,
-        codec_version: 1,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: u256_codec_fingerprint(),
     }
     assert!(
         run_fingerprint(generation, config)
-            == 0x780ef7917d69d30d0f0269b75384e87cab536497ae0e92b6707476fb21774705,
+            == 0x5c79fe328f136f8b5f4bb2a4b0da81512473e0b5019ea4802ab6f6f241e48e11,
     )
+}
+
+#[test]
+fn every_canonical_strategy_field_changes_the_fingerprint() {
+    let base = canonical_strategy_fingerprint(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    assert!(
+        base != canonical_strategy_fingerprint(101, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 102, 3, 4, 5, 6, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 103, 4, 5, 6, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 104, 5, 6, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 105, 6, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 5, 106, 7, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 5, 6, 107, 8, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 5, 6, 7, 108, 9, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 5, 6, 7, 8, 109, 10),
+    )
+    assert!(
+        base != canonical_strategy_fingerprint(1, 2, 3, 4, 5, 6, 7, 8, 9, 110),
+    )
+}
+
+#[test]
+fn golden_u256_codec_fingerprint_matches_external_keccak() {
+    assert!(
+        u256_codec_fingerprint()
+            == 0x3bcdf70d653ba1ab4cf526fc450367a00f561e4835125fcdc699acb697d4a679,
+    )
+}
+
+#[test]
+fn every_run_preimage_field_changes_the_fingerprint() {
+    let generation: u256 = 77
+    let config = replay_config(0)
+    let base = run_fingerprint(generation, config)
+    assert!(base != run_fingerprint(generation + 1, config))
+
+    var changed = config
+    changed.suite_id += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.namespace += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.target_valid_cases += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.max_discards += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.max_shrink_evaluations += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.max_state_evaluations += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.max_deployments += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.digest_format_version += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.capsule_format_version += 1
+    assert!(base != run_fingerprint(generation, changed))
+    changed = config
+    changed.codec_fingerprint += 1
+    assert!(base != run_fingerprint(generation, changed))
+}
+
+#[test]
+fn attempt_seed_ignores_run_budgets_but_binds_master_seed() {
+    let generation: u256 = 77
+    let seed = attempt_seed(42, 2, generation)
+    let base = replay_config(0)
+    let expanded = replay_config(100)
+    assert!(
+        run_fingerprint(generation, base) != run_fingerprint(generation, expanded),
+    )
+    assert!(seed == attempt_seed(42, 2, generation))
+    assert!(seed != attempt_seed(43, 2, generation))
 }
