@@ -1,0 +1,6 @@
+[ingot]
+name = "fecheck_evm_probes"
+version = "0.1.0"
+
+[dependencies]
+fecheck = { path = "../.." }

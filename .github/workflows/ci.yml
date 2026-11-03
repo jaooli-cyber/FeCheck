@@ -28,8 +28,31 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: fe --version
       - run: fe fmt --check
+      - run: fe fmt --check tests/evm-probes
       - run: fe check . --profile dev
+      - run: fe check tests/evm-probes --profile dev
+      - name: Verify root ingot emits no deployable contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/root-build"
+          mkdir -p "$out"
+          set +e
+          output="$(fe build . --profile dev --out-dir "$out" 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 1 ] || ! grep -Fq "Error: No contracts found to build" <<<"$output"; then
+            echo "root ingot did not report the expected no-contract boundary" >&2
+            exit 1
+          fi
+          if find "$out" -type f -print -quit | grep -q .; then
+            echo "root ingot unexpectedly emitted build artifacts" >&2
+            find "$out" -type f -print >&2
+            exit 1
+          fi
       - run: fe test . --backend sonatina --profile test -O 1 --jobs 1
+      - run: fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
       - name: Verify independent Keccak oracle
         shell: bash
         run: |
