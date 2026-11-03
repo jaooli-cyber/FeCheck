@@ -1,0 +1,7 @@
+use ingot::{FECHECK_FORMAT_VERSION, identity}
+
+#[test]
+fn contest_scaffold_builds() {
+    assert!(FECHECK_FORMAT_VERSION == 1)
+    assert!(identity(7) == 7)
+}

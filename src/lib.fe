@@ -1,0 +1,7 @@
+/// FeCheck is a deterministic property-testing and shrinking toolkit for Fe.
+pub const FECHECK_FORMAT_VERSION: u256 = 1
+
+/// Baseline function used only to prove the clean contest scaffold builds.
+pub fn identity(_ value: u256) -> u256 {
+    value
+}
