@@ -126,3 +126,13 @@ fn scalar_cursor_is_empty_at_origin_and_strictly_reduces_rank() {
         },
     }
 }
+
+#[test]
+fn scalar_shrink_covers_the_full_u256_distance() {
+    assert!(scalar_candidate_at(0, u256::max(), 256).is_some())
+    assert!(scalar_candidate_at(0, u256::max(), 257).is_none())
+    assert!(
+        expect_candidate(scalar_candidate_at(u256::max(), 0, 0)) == u256::max(),
+    )
+    assert!(scalar_candidate_at(u256::max(), u256::max(), 0).is_none())
+}

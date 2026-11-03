@@ -1,5 +1,6 @@
 pub use action_seq::*
 pub use outcome::*
+pub use pure_runner::*
 pub use replay::*
 pub use runner::*
 pub use scalar::*

@@ -2,6 +2,9 @@ use ingot::{
     ERROR_REJECTION_LIMIT,
     GenerationResult,
     MAX_RNG_REJECTIONS_V1,
+    ErrorCode,
+    ScalarShrinkCursor,
+    scalar_shrink_start,
     Strategy,
     U256Range,
     generate,
@@ -12,6 +15,29 @@ fn expect_generated(_ result: GenerationResult<u256>) -> u256 {
     match result {
         GenerationResult::Value(value) => value,
         GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+fn expect_cursor(
+    _ result: Result<ErrorCode, ScalarShrinkCursor>,
+    _ origin: u256,
+) -> ScalarShrinkCursor {
+    match result {
+        Result::Ok(cursor) => cursor,
+        Result::Err(_) => {
+            assert!(false)
+            scalar_shrink_start(origin, origin)
+        },
+    }
+}
+
+fn expect_rank(_ result: Result<ErrorCode, u256>) -> u256 {
+    match result {
+        Result::Ok(rank) => rank,
+        Result::Err(_) => {
             assert!(false)
             0
         },
@@ -76,4 +102,34 @@ fn invalid_strategy_and_value_are_rejected_before_rng_or_shrink() {
     assert!(valid.shrink_start(0).is_err())
     assert!(valid.rank(0).is_err())
     assert!(valid.digest(0).is_err())
+}
+
+#[test]
+fn scalar_strategy_candidates_are_in_domain_and_strict_for_small_domains() {
+    var origin: u256 = 0
+    while origin < 16 {
+        var value: u256 = 0
+        while value < 16 {
+            let strategy = U256Range { lo: 0, hi: 15, origin }
+            var cursor = expect_cursor(strategy.shrink_start(value), origin)
+            let original_rank = expect_rank(strategy.rank(value))
+            var candidates: u256 = 0
+            var done = false
+            while !done {
+                match strategy.shrink_next(cursor) {
+                    ingot::StrategyShrinkStep::Done => done = true,
+                    ingot::StrategyShrinkStep::Candidate { value: candidate, cursor: next } => {
+                        assert!(strategy.contains(candidate))
+                        let rank = expect_rank(strategy.rank(candidate))
+                        assert!(rank < original_rank)
+                        cursor = next
+                        candidates += 1
+                        assert!(candidates <= 257)
+                    },
+                }
+            }
+            value += 1
+        }
+        origin += 1
+    }
 }

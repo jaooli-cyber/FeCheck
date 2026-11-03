@@ -1,0 +1,264 @@
+use super::outcome::{
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PropertyVerdict,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    failure_key_equal,
+}
+use super::replay::{
+    RunConfig,
+    generate_u256_attempt,
+    generation_fingerprint,
+    u256_strategy_fingerprint,
+}
+use super::strategy::{GenerationResult, Strategy, StrategyShrinkStep, U256Range}
+
+pub const MAX_ATTEMPTS_V1: u256 = 4096
+pub const MAX_SHRINK_EVALUATIONS_V1: u256 = 4096
+pub const ERROR_UNSUPPORTED_FORMAT: u256 = 200
+pub const ERROR_LIMIT_TOO_LARGE: u256 = 201
+pub const ERROR_INVALID_SHRINK_CANDIDATE: u256 = 202
+
+pub enum U256ShrinkResult {
+    Complete {
+        pub minimal: u256,
+        pub stats: ShrinkStats,
+        pub status: ShrinkStatus,
+    },
+    InfrastructureError {
+        pub error: ErrorCode,
+        pub stats: ShrinkStats,
+    },
+}
+
+impl Copy for U256ShrinkResult {}
+
+pub fn empty_run_stats() -> RunStats {
+    RunStats {
+        attempts: 0,
+        valid_cases: 0,
+        discards: 0,
+        property_evaluations: 0,
+        state_evaluations: 0,
+        fixture_evaluations: 0,
+        contract_deployments: 0,
+        actions_executed: 0,
+    }
+}
+
+pub fn empty_shrink_stats() -> ShrinkStats {
+    ShrinkStats {
+        evaluations: 0,
+        accepted: 0,
+        rejected_pass: 0,
+        rejected_discard: 0,
+        rejected_failure_key: 0,
+    }
+}
+
+fn shrink_infrastructure(_ error: ErrorCode, _ stats: ShrinkStats) -> U256ShrinkResult {
+    U256ShrinkResult::InfrastructureError { error, stats }
+}
+
+pub fn shrink_u256<P: Fn(u256) -> PropertyVerdict>(
+    _ strategy: U256Range,
+    _ original: u256,
+    _ failure: FailureKey,
+    _ max_evaluations: u256,
+    _ property: P,
+) -> U256ShrinkResult
+uses P::E
+{
+    var stats = empty_shrink_stats()
+    if max_evaluations > MAX_SHRINK_EVALUATIONS_V1 {
+        return shrink_infrastructure(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: max_evaluations },
+            stats,
+        )
+    }
+
+    var current = original
+    var cursor = match strategy.shrink_start(current) {
+        Result::Ok(cursor) => cursor,
+        Result::Err(error) => {
+            return shrink_infrastructure(error, stats)
+        },
+    }
+
+    while true {
+        match strategy.shrink_next(cursor) {
+            StrategyShrinkStep::Done => {
+                return U256ShrinkResult::Complete {
+                    minimal: current,
+                    stats,
+                    status: ShrinkStatus::CompleteLocal,
+                }
+            },
+            StrategyShrinkStep::Candidate { value, cursor: next } => {
+                if stats.evaluations == max_evaluations {
+                    return U256ShrinkResult::Complete {
+                        minimal: current,
+                        stats,
+                        status: ShrinkStatus::PartialBudget,
+                    }
+                }
+
+                if !strategy.contains(value) {
+                    return shrink_infrastructure(
+                        ErrorCode { kind: ERROR_INVALID_SHRINK_CANDIDATE, detail: value },
+                        stats,
+                    )
+                }
+                let current_rank = match strategy.rank(current) {
+                    Result::Ok(rank) => rank,
+                    Result::Err(error) => {
+                        return shrink_infrastructure(error, stats)
+                    },
+                }
+                let candidate_rank = match strategy.rank(value) {
+                    Result::Ok(rank) => rank,
+                    Result::Err(error) => {
+                        return shrink_infrastructure(error, stats)
+                    },
+                }
+                if candidate_rank >= current_rank {
+                    return shrink_infrastructure(
+                        ErrorCode { kind: ERROR_INVALID_SHRINK_CANDIDATE, detail: value },
+                        stats,
+                    )
+                }
+
+                stats.evaluations += 1
+                match property(value) {
+                    PropertyVerdict::Pass => {
+                        stats.rejected_pass += 1
+                        cursor = next
+                    },
+                    PropertyVerdict::Discard => {
+                        stats.rejected_discard += 1
+                        cursor = next
+                    },
+                    PropertyVerdict::Fail(candidate_failure) => {
+                        if failure_key_equal(candidate_failure, failure) {
+                            stats.accepted += 1
+                            current = value
+                            cursor = match strategy.shrink_start(current) {
+                                Result::Ok(restarted) => restarted,
+                                Result::Err(error) => {
+                                    return shrink_infrastructure(error, stats)
+                                },
+                            }
+                        } else {
+                            stats.rejected_failure_key += 1
+                            cursor = next
+                        }
+                    },
+                    PropertyVerdict::InfrastructureError(error) => {
+                        return shrink_infrastructure(error, stats)
+                    },
+                }
+            },
+        }
+    }
+
+    shrink_infrastructure(
+        ErrorCode { kind: ERROR_INVALID_SHRINK_CANDIDATE, detail: current },
+        stats,
+    )
+}
+
+fn configuration_error(_ error: ErrorCode) -> RunOutcome<u256> {
+    RunOutcome::ConfigurationError { error, stats: empty_run_stats() }
+}
+
+pub fn check_u256<P: Fn(u256) -> PropertyVerdict>(
+    _ strategy: U256Range,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ property: P,
+) -> RunOutcome<u256>
+uses P::E
+{
+    if config.format_version != 1 || config.codec_version != 1 {
+        return configuration_error(
+            ErrorCode { kind: ERROR_UNSUPPORTED_FORMAT, detail: config.format_version },
+        )
+    }
+    if config.max_attempts > MAX_ATTEMPTS_V1
+        || config.max_shrink_evaluations > MAX_SHRINK_EVALUATIONS_V1 {
+        return configuration_error(
+            ErrorCode { kind: ERROR_LIMIT_TOO_LARGE, detail: config.max_attempts },
+        )
+    }
+    match strategy.validate() {
+        Option::Some(error) => {
+            return configuration_error(error)
+        },
+        Option::None => {},
+    }
+
+    var stats = empty_run_stats()
+    if config.target_valid_cases == 0 {
+        return RunOutcome::Passed { stats }
+    }
+
+    let generation = generation_fingerprint(u256_strategy_fingerprint(strategy))
+    while stats.valid_cases < config.target_valid_cases {
+        if stats.attempts >= config.max_attempts {
+            return RunOutcome::Exhausted { reason: ExhaustionReason::MaxAttempts, stats }
+        }
+
+        let value = match generate_u256_attempt(strategy, master_seed, generation, stats.attempts) {
+            GenerationResult::Value(value) => value,
+            GenerationResult::InfrastructureError(error) => {
+                return RunOutcome::InfrastructureError { error, stats }
+            },
+        }
+        stats.attempts += 1
+        stats.property_evaluations += 1
+
+        match property(value) {
+            PropertyVerdict::Pass => stats.valid_cases += 1,
+            PropertyVerdict::Discard => {
+                stats.discards += 1
+                if stats.discards > config.max_discards {
+                    return RunOutcome::Exhausted { reason: ExhaustionReason::MaxDiscards, stats }
+                }
+            },
+            PropertyVerdict::InfrastructureError(error) => {
+                return RunOutcome::InfrastructureError { error, stats }
+            },
+            PropertyVerdict::Fail(failure) => {
+                match shrink_u256(
+                    strategy,
+                    value,
+                    failure,
+                    config.max_shrink_evaluations,
+                    property,
+                ) {
+                    U256ShrinkResult::Complete { minimal, stats: shrink, status } => {
+                        stats.property_evaluations += shrink.evaluations
+                        return RunOutcome::Falsified {
+                            original: value,
+                            minimal,
+                            failure,
+                            stats,
+                            shrink,
+                            shrink_status: status,
+                        }
+                    },
+                    U256ShrinkResult::InfrastructureError { error, stats: shrink } => {
+                        stats.property_evaluations += shrink.evaluations
+                        return RunOutcome::InfrastructureError { error, stats }
+                    },
+                }
+            },
+        }
+    }
+
+    RunOutcome::Passed { stats }
+}

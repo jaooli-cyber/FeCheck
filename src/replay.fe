@@ -14,6 +14,7 @@ pub struct RunConfig {
     pub namespace: u256,
     pub target_valid_cases: u256,
     pub max_discards: u256,
+    pub max_attempts: u256,
     pub max_shrink_evaluations: u256,
     pub format_version: u256,
     pub codec_version: u256,

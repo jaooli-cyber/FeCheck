@@ -1,0 +1,292 @@
+use ingot::{
+    ErrorCode,
+    ExhaustionReason,
+    FailureKey,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    ShrinkStatus,
+    U256Range,
+    U256ShrinkResult,
+    check_u256,
+    shrink_u256,
+}
+
+fn base_config() -> RunConfig {
+    RunConfig {
+        suite_id: 1,
+        namespace: 2,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_attempts: 20,
+        max_shrink_evaluations: 100,
+        format_version: 1,
+        codec_version: 1,
+    }
+}
+
+fn pass_property(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::Pass
+}
+
+fn discard_zero(_ value: u256) -> PropertyVerdict {
+    if value == 0 {
+        PropertyVerdict::Discard
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+fn fail_at_ten(_ value: u256) -> PropertyVerdict {
+    if value >= 10 {
+        PropertyVerdict::Fail(FailureKey { kind: 1, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+fn mixed_shrink_property(_ value: u256) -> PropertyVerdict {
+    if value >= 11 {
+        PropertyVerdict::Fail(FailureKey { kind: 1, detail: 9 })
+    } else if value == 10 {
+        PropertyVerdict::Discard
+    } else if value == 9 {
+        PropertyVerdict::Fail(FailureKey { kind: 2, detail: 9 })
+    } else {
+        PropertyVerdict::Pass
+    }
+}
+
+fn infrastructure_property(_ value: u256) -> PropertyVerdict {
+    PropertyVerdict::InfrastructureError(ErrorCode { kind: 999, detail: value })
+}
+
+#[test]
+fn runner_counts_passes_and_handles_zero_target() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let passed = check_u256(strategy, 7, base_config(), pass_property)
+    match passed {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 3)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 3)
+        },
+        _ => assert!(false),
+    }
+
+    var zero = base_config()
+    zero.target_valid_cases = 0
+    let empty = check_u256(strategy, 7, zero, infrastructure_property)
+    match empty {
+        RunOutcome::Passed { stats } => {
+            assert!(stats.attempts == 0)
+            assert!(stats.property_evaluations == 0)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn first_discard_exhausts_when_max_discards_is_zero() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    var config = base_config()
+    config.max_discards = 0
+    let outcome = check_u256(strategy, 7, config, discard_zero)
+    match outcome {
+        RunOutcome::Exhausted { reason, stats } => {
+            match reason {
+                ExhaustionReason::MaxDiscards => {},
+                _ => assert!(false),
+            }
+            assert!(stats.attempts == 1)
+            assert!(stats.discards == 1)
+            assert!(stats.property_evaluations == 1)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn falsification_shrinks_and_preserves_accounting_equation() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let outcome = check_u256(strategy, 7, base_config(), fail_at_ten)
+    match outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(original == 100)
+            assert!(minimal == 10)
+            assert!(failure.kind == 1)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(
+                stats.property_evaluations == stats.attempts + shrink.evaluations,
+            )
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn shrink_rejects_pass_discard_and_other_failure_key() {
+    let strategy = U256Range { lo: 0, hi: 20, origin: 0 }
+    let result = shrink_u256(
+        strategy,
+        12,
+        FailureKey { kind: 1, detail: 9 },
+        100,
+        mixed_shrink_property,
+    )
+    match result {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 11)
+            assert!(stats.accepted == 1)
+            assert!(stats.rejected_pass > 0)
+            assert!(stats.rejected_discard == 2)
+            assert!(stats.rejected_failure_key == 2)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn shrink_budget_zero_distinguishes_pending_from_empty_cursor() {
+    let strategy = U256Range { lo: 0, hi: 20, origin: 0 }
+    let partial = shrink_u256(
+        strategy,
+        12,
+        FailureKey { kind: 1, detail: 9 },
+        0,
+        mixed_shrink_property,
+    )
+    match partial {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 12)
+            assert!(stats.evaluations == 0)
+            match status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let complete = shrink_u256(
+        strategy,
+        0,
+        FailureKey { kind: 1, detail: 9 },
+        0,
+        mixed_shrink_property,
+    )
+    match complete {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 0)
+            assert!(stats.evaluations == 0)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn infrastructure_and_configuration_are_not_property_failures() {
+    let strategy = U256Range { lo: 0, hi: 20, origin: 0 }
+    let result = shrink_u256(
+        strategy,
+        12,
+        FailureKey { kind: 1, detail: 9 },
+        10,
+        infrastructure_property,
+    )
+    match result {
+        U256ShrinkResult::InfrastructureError { error, stats } => {
+            assert!(error.kind == 999)
+            assert!(stats.evaluations == 1)
+        },
+        _ => assert!(false),
+    }
+
+    let invalid = U256Range { lo: 20, hi: 10, origin: 20 }
+    let outcome = check_u256(invalid, 7, base_config(), pass_property)
+    match outcome {
+        RunOutcome::ConfigurationError { error: _, stats } => {
+            assert!(stats.attempts == 0)
+            assert!(stats.property_evaluations == 0)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn exact_shrink_budget_and_reshrink_are_stable() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let failure = FailureKey { kind: 1, detail: 9 }
+
+    let partial = shrink_u256(strategy, 100, failure, 14, fail_at_ten)
+    match partial {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 10)
+            assert!(stats.evaluations == 14)
+            match status {
+                ShrinkStatus::PartialBudget => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let exact = shrink_u256(strategy, 100, failure, 15, fail_at_ten)
+    match exact {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 10)
+            assert!(stats.evaluations == 15)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+
+    let again = shrink_u256(strategy, 10, failure, 15, fail_at_ten)
+    match again {
+        U256ShrinkResult::Complete { minimal, stats, status } => {
+            assert!(minimal == 10)
+            assert!(stats.accepted == 0)
+            match status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn zero_attempt_budget_exhausts_without_evaluation() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    var config = base_config()
+    config.max_attempts = 0
+    let outcome = check_u256(strategy, 7, config, infrastructure_property)
+    match outcome {
+        RunOutcome::Exhausted { reason, stats } => {
+            match reason {
+                ExhaustionReason::MaxAttempts => {},
+                _ => assert!(false),
+            }
+            assert!(stats.attempts == 0)
+            assert!(stats.property_evaluations == 0)
+        },
+        _ => assert!(false),
+    }
+}

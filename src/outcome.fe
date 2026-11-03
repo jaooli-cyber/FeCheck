@@ -74,6 +74,10 @@ pub enum RunOutcome<T> {
         pub error: ErrorCode,
         pub stats: RunStats,
     },
+    ConfigurationError {
+        pub error: ErrorCode,
+        pub stats: RunStats,
+    },
 }
 
 impl<T> Copy for RunOutcome<T> where T: Copy {}
@@ -100,5 +104,6 @@ pub fn run_outcome_tag<T: Copy>(_ outcome: RunOutcome<T>) -> u256 {
             shrink_status: _,
         } => 2,
         RunOutcome::InfrastructureError { error: _, stats: _ } => 3,
+        RunOutcome::ConfigurationError { error: _, stats: _ } => 4,
     }
 }
