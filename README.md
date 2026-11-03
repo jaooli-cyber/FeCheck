@@ -5,10 +5,12 @@ toolkit written in Fe for the Fe Builders Challenge.
 
 The executable runner vertical remains deliberately pure: certified `u256`
 range and canonical `ActionSeq<u256, N>` runners produce directly replayable
-failure capsules. A separate stateful identity and budget-admission foundation
-now exists. Test-only EVM probes establish the required CREATE2, proxy-caller,
-and fixture-isolation capabilities, but a stateful EVM model runner is not
-claimed yet.
+failure capsules. Alongside it, an explicitly experimental stateful
+`ActionSeq<u256, N>` runner now owns deterministic scheduling, fresh-evaluation
+identity, budgets, counters, and failure-key-preserving shrinking for a fixed
+three-contract P0 fixture. Consumer-defined EVM callbacks remain a documented
+trust boundary, so this path is not certified and does not produce replay
+capsules.
 
 ## What works now
 
@@ -39,18 +41,26 @@ claimed yet.
 - canonical V1 fixture salts binding run identity, seed, attempt, local
   evaluation, and stable Target/ActorA/ActorB role tags;
 - an ingot-internal state/deployment preflight plus a bounded caller-owned
-  duplicate registry, explicitly not presented as a certified stateful API, an
-  EVM-global registry, a persistent deployment reservation, or an EVM fixture
-  runner;
+  duplicate registry, explicitly not presented as an EVM-global registry or a
+  persistent deployment reservation;
+- the public `check_u256_action_seq_stateful_experimental` scheduler, with a
+  fixed Target/ActorA/ActorB deployment count of three, transactional registry
+  adoption, deterministic original/shrink contexts, scheduler-side fixed
+  deployment accounting, validated action receipts, and the same failure-key
+  shrink discipline as the pure sequence runner;
 - a separate Fe 26.5.0 probe ingot covering exact CREATE2 prediction, a
   three-contract Target/ActorA/ActorB fixture, bound proxy callers, two isolated
   fixtures in one EVM, conservative occupied-address preflight, direct
   collision/constructor reverts, and outer-call failure capture;
+- a separate stateful-runner ingot whose golden run performs eight fresh
+  evaluations in one EVM, twenty-four direct typed CREATE2 deployments, eight
+  actions through both bound actors, and a five-candidate shrink to length two;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
   for every scalar strategy and run fingerprint field.
 
-The root ingot contains 85 passing Fe tests and the isolated EVM probe ingot
-contains 9, for 94 passing tests in total. The sequence tests include all
+The root ingot contains 97 passing Fe tests, the isolated EVM capability ingot
+contains 9, and the isolated stateful-runner ingot contains 2, for 108 passing
+Fe tests in total. The sequence tests include all
 small values in `0..2` at every logical length through three, comparison against
 an independent reference enumerator, exact shrink order and deduplication,
 private-tail independence, capacities zero through the deliberately supported
@@ -59,8 +69,9 @@ consumption across every physical slot, and canonical assertions backed by 32
 independent Python vectors, including the sequence run fingerprint, a non-edge
 attempt at index four through its complete RNG chain and value digest, and the
 754-byte fixture-salt preimage. Nine EVM probes separately verify the
-test-only deployment boundary without entering the public runner or capsule
-APIs.
+test-only deployment boundary. Two additional EVM tests exercise the
+experimental runner and its direct CREATE2 revert boundary without extending
+the certified capsule APIs.
 
 ## Verify
 
@@ -70,15 +81,19 @@ FeCheck is pinned to Fe `26.5.0` (`3dab95f`).
 fe --version
 fe fmt --check
 fe fmt --check tests/evm-probes
+fe fmt --check tests/stateful-runner
 fe check . --profile dev
 fe check tests/evm-probes --profile dev
+fe check tests/stateful-runner --profile dev
 fe test . --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
+fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
 ```
 
 The root ingot is a library with no deployable contract. CI runs `fe build`
 against that root and fails if it emits any contract artifact. Deployable probe
-contracts live only in the separate `tests/evm-probes` ingot.
+contracts live only in the separate `tests/evm-probes` and
+`tests/stateful-runner` ingots.
 
 The independent oracle also runs in CI but does not participate in the Fe
 runtime:
@@ -110,15 +125,22 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
   direct sequence replay.
 - `src/stateful.fe`: stateful fixture identity, fixed deployment-plan
   validation, atomic admission, and a caller-owned run registry.
+- `src/stateful_action_seq_runner.fe`: experimental P0 scheduler, effect-row
+  callback boundary, stateful accounting, and shrinking.
 - `tests/evm-probes`: separate ingot containing CREATE2, bound-proxy,
   freshness, occupied-address, and revert-boundary evidence.
+- `tests/stateful-runner`: separate ingot containing the full experimental
+  scheduler golden and its direct-collision boundary.
 - `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`,
   `src/action_seq_capsule_tests.fe`, `src/fixture_identity_tests.fe`, and
-  `src/stateful_tests.fe`: kernel, runner, capsule, canonical salt, budget,
-  registry, accounting, tamper, and failure-classification evidence.
+  `src/stateful_tests.fe` plus `src/stateful_action_seq_runner_tests.fe`:
+  kernel, runner, capsule, canonical salt, budget, registry, accounting,
+  callback-protocol, tamper, and failure-classification evidence.
 - `tools/oracle_vectors.py`: independent canonical-preimage oracle.
 - `docs/SEMANTICS.md`: normative behavior implemented by the current slice.
 - `docs/EVM_PROBES.md`: exact EVM evidence and its claim boundary.
+- `docs/STATEFUL_RUNNER.md`: experimental scheduler protocol, evidence, and
+  non-certification boundary.
 
 ## Status and limitations
 
@@ -127,11 +149,18 @@ canonical sequence kernels, pure `FailureKey`-preserving runners, certified
 capsules, and direct replay paths are verified. Canonical deployment salts and
 the pre-EVM state/deployment admission boundary are also verified. Test-only
 EVM probes verify exact deployments, bound callers, same-EVM fixture isolation,
-and the direct CREATE2 revert boundary. A scheduler-owned stateful fixture,
-fresh-per-candidate model execution, successful deployment/action accounting,
-measured state/deployment limits, external capsule serialization/decoding, and
-the final demo remain in development. Gate C is therefore partial and is not
-represented as complete.
+and the direct CREATE2 revert boundary. The experimental scheduler now assigns
+fresh identities to every original and shrink evaluation, enforces its budgets,
+and accounts for its fixed three-deployment fixture and executed-action
+receipts. Its isolated golden exercises a fresh fixture and local model on every
+candidate.
+
+This does not make the stateful path certified: Fe does not prove that the
+preflight is non-mutating or that a returning evaluator really completed the
+three deployments, and the current fingerprints do not bind adapter bytecode,
+model, or fixture policy. Stateful capsule/replay, external capsule
+serialization/decoding, the final AccountingLedger demo, and a bound adapter
+identity remain in development. Gate C is therefore still partial.
 
 See [PROVENANCE.md](PROVENANCE.md) for the contest boundary, prior-work
 disclosure, starter reuse, and AI-assistance statement.

@@ -1,0 +1,400 @@
+use fecheck::{
+    ActionSeq,
+    ErrorCode,
+    FailureKey,
+    FixtureRole,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    ShrinkStatus,
+    StatefulActionSeqRequest,
+    StatefulEvaluationContext,
+    StatefulEvaluationReceipt,
+    StatefulFixturePreflight,
+    StatefulFixtureRequest,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_empty,
+    action_seq_get,
+    action_seq_len,
+    action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_stateful_experimental,
+    stateful_fixture_salt,
+    stateful_run_registry_contains,
+    stateful_run_registry_empty,
+    stateful_run_registry_len,
+}
+use std::evm::{Address, Call, Create, Ctx, Evm, predict_create2}
+
+const ERROR_C5_PREDICTED_ADDRESS_OCCUPIED: u256 = 700
+const C5_FAILURE_KIND: u256 = 900
+const C5_FAILURE_DETAIL: u256 = 2
+
+msg C5RunnerTargetMsg {
+    #[selector = 0x43503501]
+    Step { marker: u256 } -> u256,
+    #[selector = 0x43503502]
+    Count -> u256,
+    #[selector = 0x43503503]
+    LastCaller -> u256,
+    #[selector = 0x43503504]
+    LastMarker -> u256,
+}
+
+struct C5RunnerTargetStore { count: u256, last_caller: u256, last_marker: u256 }
+
+pub contract C5RunnerTarget uses (ctx: Ctx) {
+    mut store: C5RunnerTargetStore,
+
+    recv C5RunnerTargetMsg {
+        Step { marker } -> u256 uses (mut store, ctx) {
+            store.count += 1
+            store.last_caller = ctx.caller().word()
+            store.last_marker = marker
+            store.count
+        }
+        Count -> u256 uses (store) {
+            store.count
+        }
+        LastCaller -> u256 uses (store) {
+            store.last_caller
+        }
+        LastMarker -> u256 uses (store) {
+            store.last_marker
+        }
+    }
+}
+
+msg C5RunnerActorMsg {
+    #[selector = 0x43503510]
+    Relay { marker: u256 } -> u256,
+    #[selector = 0x43503511]
+    BoundTarget -> Address,
+}
+
+struct C5RunnerActorStore { target: Address }
+
+pub contract C5RunnerActor uses (call: mut Call) {
+    mut store: C5RunnerActorStore,
+
+    init(target: Address) uses (mut store) { store.target = target }
+
+    recv C5RunnerActorMsg {
+        Relay { marker } -> u256 uses (store, mut call) {
+            call.call(
+                addr: store.target,
+                gas: 100000,
+                value: Wei::zero(),
+                message: C5RunnerTargetMsg::Step { marker },
+            )
+        }
+        BoundTarget -> Address uses (store) {
+            store.target
+        }
+    }
+}
+
+struct C5RunnerSalts { target: u256, actor_a: u256, actor_b: u256 }
+
+impl Copy for C5RunnerSalts {}
+
+struct C5RunnerFixture { target: Address, actor_a: Address, actor_b: Address }
+
+impl Copy for C5RunnerFixture {}
+
+fn c5_runner_salts(_ context: StatefulEvaluationContext) -> C5RunnerSalts {
+    C5RunnerSalts {
+        target: stateful_fixture_salt(context, FixtureRole::Target),
+        actor_a: stateful_fixture_salt(context, FixtureRole::ActorA),
+        actor_b: stateful_fixture_salt(context, FixtureRole::ActorB),
+    }
+}
+
+fn predicted_c5_runner_fixture(
+    _ context: StatefulEvaluationContext,
+    _ deployer: Address,
+) -> C5RunnerFixture {
+    let salts = c5_runner_salts(context)
+    let target = predict_create2<C5RunnerTarget>(deployer, args: (), salt: salts.target)
+    C5RunnerFixture {
+        target,
+        actor_a: predict_create2<C5RunnerActor>(deployer, args: (target,), salt: salts.actor_a),
+        actor_b: predict_create2<C5RunnerActor>(deployer, args: (target,), salt: salts.actor_b),
+    }
+}
+
+fn assert_fixture_identity_is_distinct(_ salts: C5RunnerSalts, _ fixture: C5RunnerFixture) {
+    assert!(salts.target != salts.actor_a)
+    assert!(salts.target != salts.actor_b)
+    assert!(salts.actor_a != salts.actor_b)
+    assert!(fixture.target != fixture.actor_a)
+    assert!(fixture.target != fixture.actor_b)
+    assert!(fixture.actor_a != fixture.actor_b)
+}
+
+fn occupied_error(_ address: Address) -> StatefulFixturePreflight {
+    StatefulFixturePreflight::InfrastructureError {
+        error: ErrorCode { kind: ERROR_C5_PREDICTED_ADDRESS_OCCUPIED, detail: address.word() },
+    }
+}
+
+struct C5RunnerPreflight {}
+
+impl Copy for C5RunnerPreflight {}
+
+impl Fn(StatefulFixtureRequest) -> _ for C5RunnerPreflight {
+    uses E = (evm: mut Evm)
+    type Out = StatefulFixturePreflight
+
+    fn call(self, _ request: StatefulFixtureRequest) -> StatefulFixturePreflight
+    uses E
+    {
+        let fixture = predicted_c5_runner_fixture(request.context, evm.address())
+
+        // All three observations precede the first CREATE2 in the evaluator.
+        if evm.extcodesize(fixture.target) != 0 {
+            return occupied_error(fixture.target)
+        }
+        if evm.extcodesize(fixture.actor_a) != 0 {
+            return occupied_error(fixture.actor_a)
+        }
+        if evm.extcodesize(fixture.actor_b) != 0 {
+            return occupied_error(fixture.actor_b)
+        }
+        StatefulFixturePreflight::Ready
+    }
+}
+
+fn deploy_c5_runner_fixture(_ context: StatefulEvaluationContext) -> C5RunnerFixture
+uses (evm: mut Evm)
+{
+    let salts = c5_runner_salts(context)
+    let predicted = predicted_c5_runner_fixture(context, evm.address())
+    assert_fixture_identity_is_distinct(salts, predicted)
+
+    let target = evm.create2<C5RunnerTarget>(value: Wei::zero(), args: (), salt: salts.target)
+    let actor_a = evm
+        .create2<C5RunnerActor>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_a,
+        )
+    let actor_b = evm
+        .create2<C5RunnerActor>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_b,
+        )
+
+    assert!(target == predicted.target)
+    assert!(actor_a == predicted.actor_a)
+    assert!(actor_b == predicted.actor_b)
+    assert!(evm.extcodesize(target) != 0)
+    assert!(evm.extcodesize(actor_a) != 0)
+    assert!(evm.extcodesize(actor_b) != 0)
+    C5RunnerFixture { target, actor_a, actor_b }
+}
+
+fn target_count(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: C5RunnerTargetMsg::Count {},
+    )
+}
+
+fn target_last_caller(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: C5RunnerTargetMsg::LastCaller {},
+    )
+}
+
+fn target_last_marker(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: C5RunnerTargetMsg::LastMarker {},
+    )
+}
+
+fn actor_bound_target(_ actor: Address) -> Address uses (evm: mut Evm) {
+    evm.call(
+        addr: actor,
+        gas: 100000,
+        value: Wei::zero(),
+        message: C5RunnerActorMsg::BoundTarget {},
+    )
+}
+
+fn relay(_ actor: Address, _ marker: u256) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: actor,
+        gas: 200000,
+        value: Wei::zero(),
+        message: C5RunnerActorMsg::Relay { marker },
+    )
+}
+
+struct C5RunnerEvaluator {}
+
+impl Copy for C5RunnerEvaluator {}
+
+impl Fn(StatefulActionSeqRequest<3>) -> _ for C5RunnerEvaluator {
+    uses E = (evm: mut Evm)
+    type Out = StatefulEvaluationReceipt
+
+    fn call(self, _ request: StatefulActionSeqRequest<3>) -> StatefulEvaluationReceipt
+    uses E
+    {
+        let fixture = deploy_c5_runner_fixture(request.context)
+        assert!(actor_bound_target(fixture.actor_a) == fixture.target)
+        assert!(actor_bound_target(fixture.actor_b) == fixture.target)
+        assert!(target_count(fixture.target) == 0)
+        assert!(target_last_caller(fixture.target) == 0)
+        assert!(target_last_marker(fixture.target) == 0)
+
+        var model_count: u256 = 0
+        var index: usize = 0
+        let logical_len = action_seq_len(request.value)
+        while index < logical_len {
+            let action = match action_seq_get(request.value, index) {
+                Option::Some(action) => action,
+                Option::None => {
+                    assert!(false)
+                    0
+                },
+            }
+            let actor = if index % 2 == 0 {
+                fixture.actor_a
+            } else {
+                fixture.actor_b
+            }
+            model_count += 1
+            assert!(relay(actor, action) == model_count)
+            assert!(target_count(fixture.target) == model_count)
+            assert!(target_last_caller(fixture.target) == actor.word())
+            assert!(target_last_marker(fixture.target) == action)
+            index += 1
+        }
+        if logical_len != 0 {
+            let final_index = logical_len - 1
+            let expected_final_actor = if final_index % 2 == 0 {
+                fixture.actor_a
+            } else {
+                fixture.actor_b
+            }
+            assert!(
+                target_last_caller(fixture.target) == expected_final_actor.word(),
+            )
+        }
+
+        let verdict = if logical_len >= 2 {
+            PropertyVerdict::Fail(
+                FailureKey { kind: C5_FAILURE_KIND, detail: C5_FAILURE_DETAIL },
+            )
+        } else {
+            PropertyVerdict::Pass
+        }
+        StatefulEvaluationReceipt { verdict, actions_executed: logical_len as u256 }
+    }
+}
+
+fn runner_strategy() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy { action: U256Range { lo: 0, hi: 3, origin: 0 }, max_actions: 3 }
+}
+
+fn runner_config() -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 8,
+        max_deployments: 24,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+#[test]
+fn stateful_runner_uses_a_fresh_three_contract_fixture_for_every_shrink_candidate()
+uses (evm: mut Evm)
+{
+    let config = runner_config()
+    let report = check_u256_action_seq_stateful_experimental(
+        runner_strategy(),
+        7,
+        config,
+        stateful_run_registry_empty(),
+        C5RunnerPreflight {},
+        C5RunnerEvaluator {},
+    )
+
+    assert!(stateful_run_registry_len(report.registry) == 1)
+    assert!(
+        stateful_run_registry_contains(report.registry, config.suite_id, config.namespace),
+    )
+    match report.outcome {
+        RunOutcome::Falsified { original, minimal, failure, stats, shrink, shrink_status } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(failure.kind == C5_FAILURE_KIND)
+            assert!(failure.detail == C5_FAILURE_DETAIL)
+            assert!(stats.attempts == 3)
+            assert!(stats.valid_cases == 2)
+            assert!(stats.discards == 0)
+            assert!(shrink.evaluations == 5)
+            assert!(shrink.accepted == 1)
+            assert!(shrink.rejected_pass == 4)
+            assert!(shrink.rejected_discard == 0)
+            assert!(shrink.rejected_failure_key == 0)
+            assert!(stats.property_evaluations == 8)
+            assert!(stats.fixture_evaluations == 8)
+            assert!(stats.contract_deployments == 24)
+            assert!(stats.actions_executed == 8)
+            assert!(
+                stats.property_evaluations == stats.attempts + shrink.evaluations,
+            )
+            assert!(stats.fixture_evaluations == stats.property_evaluations)
+            assert!(
+                stats.contract_deployments == 3 * stats.fixture_evaluations,
+            )
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+}
+
+fn collision_request() -> StatefulActionSeqRequest<3> {
+    let value: ActionSeq<u256, 3> = action_seq_empty(0)
+    StatefulActionSeqRequest {
+        value,
+        context: StatefulEvaluationContext {
+            run_fingerprint: 1,
+            suite_id: 51,
+            run_namespace: 61,
+            master_seed: 7,
+            attempt_index: 0,
+            local_evaluation_index: 0,
+        },
+    }
+}
+
+#[test(should_revert)]
+fn a_direct_typed_create2_collision_still_reverts_outside_the_structured_runner()
+uses (evm: mut Evm)
+{
+    let request = collision_request()
+    let _first = C5RunnerEvaluator {}(request)
+    let _collision = C5RunnerEvaluator {}(request)
+}

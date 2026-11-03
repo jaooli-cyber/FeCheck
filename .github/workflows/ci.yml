@@ -29,8 +29,10 @@ jobs:
       - run: fe --version
       - run: fe fmt --check
       - run: fe fmt --check tests/evm-probes
+      - run: fe fmt --check tests/stateful-runner
       - run: fe check . --profile dev
       - run: fe check tests/evm-probes --profile dev
+      - run: fe check tests/stateful-runner --profile dev
       - name: Verify root ingot emits no deployable contracts
         shell: bash
         run: |
@@ -53,6 +55,7 @@ jobs:
           fi
       - run: fe test . --backend sonatina --profile test -O 1 --jobs 1
       - run: fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
+      - run: fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
       - name: Verify independent Keccak oracle
         shell: bash
         run: |
