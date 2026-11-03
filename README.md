@@ -214,12 +214,15 @@ python tools/adapter_manifest.py \
 
 ## Status and limitations
 
-This is an active contest build, not a finished submission. The scalar and
-canonical sequence kernels, pure `FailureKey`-preserving runners, certified
-capsules, and direct replay paths are verified. Canonical deployment salts and
-the pre-EVM state/deployment admission boundary are also verified. Test-only
-EVM probes verify exact deployments, bound callers, same-EVM fixture isolation,
-and the direct CREATE2 revert boundary. The experimental scheduler now assigns
+This is a private release candidate. Implementation and verification for the
+current contest scope are complete; repository publication, the final public
+commit reference, and the external submission remain intentionally pending.
+The scalar and canonical sequence kernels, pure `FailureKey`-preserving
+runners, certified capsules, and direct replay paths are verified. Canonical
+deployment salts and the pre-EVM state/deployment admission boundary are
+also verified. Test-only EVM probes verify exact deployments, bound callers,
+same-EVM fixture isolation, and the direct CREATE2 revert boundary. The
+experimental scheduler now assigns
 fresh identities to every original and shrink evaluation, enforces its budgets,
 and accounts for its fixed three-deployment fixture and executed-action
 receipts. Its isolated golden exercises a fresh fixture and local model on every
