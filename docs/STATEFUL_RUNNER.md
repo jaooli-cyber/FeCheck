@@ -12,7 +12,7 @@ It is not a certified runner.
 `recheck_u256_action_seq_stateful_bound_v1` add a manifest-bound capsule and a
 verified full-run recheck without changing that callback trust boundary.
 
-## Fixed P0 boundary
+## Fixed three-role boundary
 
 The runner is specialized to `ActionSeq<u256, N>` and fixes the fixture plan at
 three successful deployments per evaluated input:
@@ -118,7 +118,7 @@ history.
 
 ## Manifest-bound receipts and capsule
 
-`StatefulAdapterIdentityV1` commits to the root protocol and P0 fixture plan,
+`StatefulAdapterIdentityV1` commits to the root protocol and fixed fixture plan,
 the adapter's concrete fixture policy, action encoding, model, snapshot and
 failure schemas, adapter logic, target initcode/runtime, actor-template
 initcode/runtime, source bundle, and toolchain/build profile. The actor initcode

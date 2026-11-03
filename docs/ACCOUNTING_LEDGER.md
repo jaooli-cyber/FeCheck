@@ -1,6 +1,6 @@
 # AccountingLedger
 
-AccountingLedger is FeCheck's C6a state-machine demonstration. It exercises
+AccountingLedger is FeCheck's concrete state-machine demonstration. It exercises
 the stateful action-sequence scheduler against a deliberately incorrect ledger,
 reduces the resulting accounting violation, runs the same generated workload
 against a corrected implementation, and performs a manifest-bound full-run
@@ -131,7 +131,7 @@ property checks otherwise remain the same.
 
 ## Deterministic evidence
 
-The independent Python oracle fixes the following C6a vector:
+The independent Python oracle fixes the following AccountingLedger vector:
 
 ```text
 master seed        1608
@@ -208,7 +208,7 @@ generation, attempt, and four RNG-word hashes. It also simulates the packed
 decoder, pure model, buggy/fixed targets, current candidate order, trace, and
 counters, then derives 25 AccountingLedger vectors for the six semantic
 domains, adapter, bound-run, execution, capsule, and wire identities. These are
-in addition to the 32 pre-C6a vectors. The Fe ingot supplies the end-to-end EVM
+in addition to the 32 core vectors. The Fe ingot supplies the end-to-end EVM
 evidence; neither side is used as the implementation of the other.
 
 ## Reproducible adapter manifest

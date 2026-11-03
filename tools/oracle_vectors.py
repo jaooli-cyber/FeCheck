@@ -292,7 +292,7 @@ fixture_preimage, fixture_hash = hash_word_fields(
     ],
 )
 
-# AccountingLedger C6a uses a compact one-word action domain.  These values are
+# AccountingLedger uses a compact one-word action domain. These values are
 # intentionally computed without importing FeCheck so the Python oracle remains
 # an independent implementation of the canonical encoding and RNG chain.
 LEDGER_LO = 0
@@ -1316,7 +1316,7 @@ def verify_accounting_ledger_vectors() -> None:
 def main() -> None:
     if len(VECTORS) != 32:
         raise AssertionError(
-            f"expected the 32 pre-C6a vectors to remain intact, got {len(VECTORS)}"
+            f"expected the 32 core vectors to remain intact, got {len(VECTORS)}"
         )
     for name, (payload, digest, expected_hex) in VECTORS.items():
         actual_hex = digest.hex()

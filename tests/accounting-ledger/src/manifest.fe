@@ -1,7 +1,7 @@
 use fecheck::{
     STATEFUL_ADAPTER_IDENTITY_VERSION_V1,
     StatefulAdapterIdentityV1,
-    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_fixed_fixture_plan_fingerprint_v1,
     stateful_protocol_fingerprint_v1,
 }
 use std::evm::{Address, init_code_hash}
@@ -32,7 +32,7 @@ fn ledger_adapter_identity_v1(
     StatefulAdapterIdentityV1 {
         identity_version: STATEFUL_ADAPTER_IDENTITY_VERSION_V1,
         protocol_fingerprint: stateful_protocol_fingerprint_v1(),
-        fixture_plan_fingerprint: stateful_p0_fixture_plan_fingerprint_v1(),
+        fixture_plan_fingerprint: stateful_fixed_fixture_plan_fingerprint_v1(),
         fixture_policy_fingerprint: LEDGER_FIXTURE_POLICY_FINGERPRINT_V1,
         action_encoding_fingerprint: LEDGER_ACTION_ENCODING_FINGERPRINT_V1,
         model_fingerprint: LEDGER_MODEL_FINGERPRINT_V1,

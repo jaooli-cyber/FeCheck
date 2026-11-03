@@ -36,7 +36,7 @@ use fecheck::{
     stateful_bound_capsule_digest_v1,
     stateful_bound_run_fingerprint_v1,
     stateful_original_execution_fingerprint_v1,
-    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_fixed_fixture_plan_fingerprint_v1,
     stateful_protocol_fingerprint_v1,
     stateful_replay_execution_fingerprint_v1,
     stateful_replay_registry_contains,
@@ -226,7 +226,7 @@ fn adapter_manifests_pin_distinct_contract_builds() {
         stateful_protocol_fingerprint_v1() == LEDGER_STATEFUL_PROTOCOL_FINGERPRINT_V1,
     )
     assert!(
-        stateful_p0_fixture_plan_fingerprint_v1() == LEDGER_STATEFUL_FIXTURE_PLAN_FINGERPRINT_V1,
+        stateful_fixed_fixture_plan_fingerprint_v1() == LEDGER_STATEFUL_FIXTURE_PLAN_FINGERPRINT_V1,
     )
     assert!(
         buggy.source_bundle_fingerprint == LEDGER_SOURCE_BUNDLE_KECCAK_V1,

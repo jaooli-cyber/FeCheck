@@ -1,0 +1,6 @@
+[ingot]
+name = "fecheck_quickstart"
+version = "0.1.0"
+
+[dependencies]
+fecheck = { path = "../.." }

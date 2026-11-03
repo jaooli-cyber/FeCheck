@@ -44,8 +44,8 @@ use super::stateful::{
 }
 use super::strategy::GenerationResult
 
-/// Exact Target/ActorA/ActorB deployment count of the experimental P0 runner.
-pub const STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1: u256 = 3
+/// Exact Target/ActorA/ActorB deployment count of the experimental runner.
+pub const STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1: u256 = 3
 
 pub const ERROR_STATEFUL_ACTIONS_EXCEED_SEQUENCE: u256 = 507
 pub const ERROR_STATEFUL_PASS_INCOMPLETE_ACTIONS: u256 = 508
@@ -76,7 +76,7 @@ pub enum StatefulFixturePreflight {
 
 impl Copy for StatefulFixturePreflight {}
 
-/// Result returned after one fresh P0 fixture has been exercised.
+/// Result returned after one fresh three-role fixture has been exercised.
 ///
 /// Returning from the evaluator is an adapter assertion that all three typed
 /// CREATE2 deployments completed. A direct deployment revert escapes the
@@ -147,8 +147,8 @@ enum StatefulU256ActionSeqShrinkResult<const N: usize> {
 
 impl<const N: usize> Copy for StatefulU256ActionSeqShrinkResult<N> {}
 
-fn p0_fixture_plan() -> StatefulFixturePlan {
-    StatefulFixturePlan { deployments_per_evaluation: STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 }
+fn fixed_fixture_plan() -> StatefulFixturePlan {
+    StatefulFixturePlan { deployments_per_evaluation: STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1 }
 }
 
 fn action_seq_descriptor_or_zero<const N: usize>(_ value: ActionSeq<u256, N>) -> u256 {
@@ -223,7 +223,7 @@ uses (P::E, X::E, V::E)
 {
     var proposal_stats = prior_stats
     var required_deployments: u256 = 0
-    match admit_stateful_evaluation(config, p0_fixture_plan(), prior_stats) {
+    match admit_stateful_evaluation(config, fixed_fixture_plan(), prior_stats) {
         StatefulAdmission::Admitted { stats, required_deployments: required } => {
             proposal_stats = stats
             required_deployments = required
@@ -238,7 +238,7 @@ uses (P::E, X::E, V::E)
         },
     }
 
-    if required_deployments != STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 {
+    if required_deployments != STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1 {
         return StatefulEvaluationStep::InfrastructureError {
             error: ErrorCode {
                 kind: ERROR_STATEFUL_ACCOUNTING_MISMATCH,
@@ -514,7 +514,7 @@ uses (P::E, X::E, V::E)
         },
         Option::None => {},
     }
-    match validate_stateful_fixture_plan(config, p0_fixture_plan()) {
+    match validate_stateful_fixture_plan(config, fixed_fixture_plan()) {
         Option::Some(error) => {
             return stateful_action_seq_configuration_error(error, registry)
         },
@@ -670,7 +670,7 @@ uses (P::E, X::E, V::E)
     stateful_action_seq_report(RunOutcome::Passed { stats }, active_registry)
 }
 
-/// Experimental, non-certified P0 stateful sequence runner.
+/// Experimental, non-certified stateful sequence runner.
 ///
 /// The root ingot owns deterministic generation, evaluation identity,
 /// admission, counters, and shrinking. Consumer callbacks own EVM observation,

@@ -1,17 +1,18 @@
-# Fe Builders Challenge submission - private release candidate
+# Fe Builders Challenge submission
 
 The implementation, demo, documentation, Red Team review, and automated
-verification for the current contest scope are complete. The repository remains
-private by design. Publication and the external submission are separate release
-steps and are not claimed here as completed.
+verification for the contest scope are complete. The immutable submission
+artifact is identified by the `v0.1.0` release tag. Its exact SHA, publication
+date, and official receipt are recorded by GitHub and the private submission
+records rather than asserted by this source tree.
 
 - Project: FeCheck
 - Repository: https://github.com/jaooli-cyber/FeCheck
 - License: Apache-2.0
 - Language/toolchain: Fe 26.5.0 (`3dab95f`), Sonatina, test profile, O1
-- Status: implementation complete; private publication candidate
-- Registration/project identifiers: intentionally kept outside the repository
-- Exact public submission commit: to be fixed during publication
+- Status: implementation and verification complete
+- Submission release: `v0.1.0`
+- Registration/project identifiers: retained only in official private records
 
 ## Summary
 
@@ -68,14 +69,17 @@ fe fmt --check
 fe fmt --check tests/evm-probes
 fe fmt --check tests/stateful-runner
 fe fmt --check tests/accounting-ledger
+fe fmt --check examples/quickstart
 fe check . --profile dev
 fe check tests/evm-probes --profile dev
 fe check tests/stateful-runner --profile dev
 fe check tests/accounting-ledger --profile dev
+fe check examples/quickstart --profile dev
 fe test . --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
+fe test examples/quickstart --backend sonatina --profile test -O 1 --jobs 1
 
 python3 -m venv .venv-oracle
 . .venv-oracle/bin/activate
@@ -96,21 +100,22 @@ Current evidence totals:
 - 9 EVM probe tests;
 - 2 isolated stateful-runner tests;
 - 15 AccountingLedger tests;
-- 134 passing Fe tests in total;
+- 1 independent quickstart-consumer test;
+- 135 passing Fe tests in total;
 - 11 manifest-verifier unit tests;
-- 32 pre-C6a and 25 AccountingLedger oracle vectors.
+- 32 core and 25 AccountingLedger oracle vectors.
 
-## Release checklist
+## Verified release evidence
 
-- [x] implementation and demo complete;
-- [x] Red Team final review: S0=0, S1=0;
-- [x] pinned CI, source/toolchain manifest, and independent oracle green;
-- [x] provenance and Apache-2.0 license present;
-- [x] private `main` green at the release-candidate stage;
-- [ ] populate the official form after its fields are supplied;
-- [ ] make the repository public during that submission workflow;
-- [ ] record the exact public submission commit and complete the external
-  challenge-submission step.
+- implementation and flagship demo complete;
+- Red Team final review: S0=0, S1=0, S2=0;
+- pinned CI, source/toolchain manifest, and independent oracle green;
+- provenance and Apache-2.0 license present.
+
+The GitHub Release records the immutable tag, exact SHA, and publication date.
+The official form and private submission records retain the receipt, project
+identifier, and any private code; those values do not belong in this
+repository.
 
 See `README.md`, `docs/SEMANTICS.md`, `docs/STATEFUL_RUNNER.md`,
 `docs/ACCOUNTING_LEDGER.md`, and `PROVENANCE.md` for the complete semantics,

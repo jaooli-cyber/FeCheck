@@ -34,7 +34,7 @@ use super::stateful::{
     stateful_run_registry_len,
 }
 use super::stateful_action_seq_runner::{
-    STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1,
+    STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1,
     StatefulActionSeqRequest,
     StatefulActionSeqRunReport,
     StatefulEvaluationReceipt,
@@ -131,9 +131,9 @@ pub fn stateful_protocol_fingerprint_v1() -> u256 {
     keccak_words([DOMAIN_STATEFUL_PROTOCOL_V1, 1])
 }
 
-pub fn stateful_p0_fixture_plan_fingerprint_v1() -> u256 {
+pub fn stateful_fixed_fixture_plan_fingerprint_v1() -> u256 {
     keccak_words(
-        [DOMAIN_STATEFUL_FIXTURE_PLAN_V1, STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1],
+        [DOMAIN_STATEFUL_FIXTURE_PLAN_V1, STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1],
     )
 }
 
@@ -241,7 +241,7 @@ fn validate_stateful_adapter_identity_v1(_ identity: StatefulAdapterIdentityV1) 
             },
         )
     }
-    let expected_fixture = stateful_p0_fixture_plan_fingerprint_v1()
+    let expected_fixture = stateful_fixed_fixture_plan_fingerprint_v1()
     if identity.fixture_plan_fingerprint != expected_fixture {
         return Option::Some(
             ErrorCode {
@@ -777,8 +777,8 @@ pub fn validate_stateful_bound_stats_v1(
     if run.fixture_evaluations != run.property_evaluations {
         return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 11 })
     }
-    if run.contract_deployments % STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1 != 0
-        || run.contract_deployments / STATEFUL_P0_DEPLOYMENTS_PER_EVALUATION_V1
+    if run.contract_deployments % STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1 != 0
+        || run.contract_deployments / STATEFUL_FIXED_DEPLOYMENTS_PER_EVALUATION_V1
             != run.fixture_evaluations {
         return Option::Some(ErrorCode { kind: ERROR_STATEFUL_BOUND_STATS, detail: 12 })
     }

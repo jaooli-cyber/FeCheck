@@ -31,10 +31,12 @@ jobs:
       - run: fe fmt --check tests/evm-probes
       - run: fe fmt --check tests/stateful-runner
       - run: fe fmt --check tests/accounting-ledger
+      - run: fe fmt --check examples/quickstart
       - run: fe check . --profile dev
       - run: fe check tests/evm-probes --profile dev
       - run: fe check tests/stateful-runner --profile dev
       - run: fe check tests/accounting-ledger --profile dev
+      - run: fe check examples/quickstart --profile dev
       - name: Verify root ingot emits no deployable contracts
         shell: bash
         run: |
@@ -59,6 +61,7 @@ jobs:
       - run: fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
       - run: fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
       - run: fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
+      - run: fe test examples/quickstart --backend sonatina --profile test -O 1 --jobs 1
       - name: Verify independent Python evidence
         shell: bash
         run: |

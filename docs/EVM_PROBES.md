@@ -69,5 +69,5 @@ fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 
 The capability-probe ingot contains 9 tests, the root ingot contains 108, and
 the separate stateful-runner ingot contains 2. The AccountingLedger ingot adds
-15, for 134 Fe tests in total. Keep
+15, and the independent quickstart adds 1, for 135 Fe tests in total. Keep
 `--jobs 1` for predictable resource use while compiling embedded contracts.

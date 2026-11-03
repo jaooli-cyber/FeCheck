@@ -1,0 +1,54 @@
+use fecheck::{
+    FailureKey,
+    PureU256Property,
+    PropertyVerdict,
+    RunConfig,
+    U256Range,
+    U256ReplayOutcome,
+    check_u256_certified,
+    replay_u256_capsule,
+    u256_codec_fingerprint,
+}
+
+struct FailsAtTen {}
+impl Copy for FailsAtTen {}
+
+impl PureU256Property for FailsAtTen {
+    fn evaluate(self, _ value: u256) -> PropertyVerdict {
+        if value >= 10 {
+            PropertyVerdict::Fail(FailureKey { kind: 1, detail: 0 })
+        } else {
+            PropertyVerdict::Pass
+        }
+    }
+}
+
+fn config() -> RunConfig {
+    RunConfig {
+        suite_id: 1,
+        namespace: 1,
+        target_valid_cases: 3,
+        max_discards: 10,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 0,
+        max_deployments: 0,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: u256_codec_fingerprint(),
+    }
+}
+
+#[test]
+fn finds_shrinks_and_replays() {
+    let strategy = U256Range { lo: 0, hi: 100, origin: 0 }
+    let report = check_u256_certified(strategy, 7, config(), FailsAtTen {})
+    let capsule = report.capsule.unwrap()
+
+    match replay_u256_capsule(strategy, config(), capsule, FailsAtTen {}) {
+        U256ReplayOutcome::Reproduced { original, minimal, shrink: _, shrink_status: _ } => {
+            assert!(original == 100)
+            assert!(minimal == 10)
+        },
+        _ => assert!(false),
+    }
+}

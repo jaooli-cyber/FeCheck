@@ -278,7 +278,7 @@ full-run replay but still delegates EVM effects to those callbacks.
 ## Experimental stateful ActionSeq runner
 
 `check_u256_action_seq_stateful_experimental` specializes the current stateful
-path to `ActionSeq<u256, N>` and fixes the P0 fixture plan internally at three
+path to `ActionSeq<u256, N>` and fixes the fixture plan internally at three
 deployments: Target, ActorA, and ActorB. The plan is not caller-selectable. The
 root ingot owns deterministic generation, context construction, admission,
 statistics, verdict classification, and shrinking; it imports no EVM capability
@@ -339,8 +339,8 @@ cross-build address guarantee, or a global uniqueness proof. See
 
 ## Manifest-bound stateful full-run recheck
 
-`StatefulAdapterIdentityV1` contains the identity version, root protocol and P0
-fixture-plan fingerprints, concrete fixture policy, action/model/snapshot/
+`StatefulAdapterIdentityV1` contains the identity version, root protocol and
+fixed three-role fixture-plan fingerprints, concrete fixture policy, action/model/snapshot/
 failure/adapter fingerprints, target initcode/runtime, actor-template
 initcode/runtime, source bundle, and toolchain fingerprint. The actor identity
 field is an initcode template hash (AccountingLedger uses `Address::zero()`);
