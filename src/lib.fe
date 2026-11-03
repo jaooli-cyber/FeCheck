@@ -11,6 +11,7 @@ pub use runner::*
 pub use scalar::*
 pub use stateful::*
 pub use stateful_action_seq_runner::*
+pub use stateful_bound_recheck::*
 pub use strategy::*
 
 /// Version of FeCheck's public deterministic format.

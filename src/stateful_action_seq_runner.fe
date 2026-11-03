@@ -85,6 +85,21 @@ pub struct StatefulEvaluationReceipt { pub verdict: PropertyVerdict, pub actions
 
 impl Copy for StatefulEvaluationReceipt {}
 
+/// Ingot-level adapter hook. It lets a higher-level boundary verify richer
+/// callback evidence before the scheduler accounts the ordinary receipt.
+pub(ingot) struct StatefulEvaluationVerificationRequest<const N: usize, R: Copy> {
+    pub request: StatefulActionSeqRequest<N>,
+    pub receipt: R,
+}
+
+impl<const N: usize, R: Copy> Copy for StatefulEvaluationVerificationRequest<N, R> {}
+
+fn accept_experimental_receipt<const N: usize>(
+    _ verification: StatefulEvaluationVerificationRequest<N, StatefulEvaluationReceipt>,
+) -> StatefulEvaluationReceipt {
+    verification.receipt
+}
+
 /// Structured outcome plus the caller-owned namespace registry.
 pub struct StatefulActionSeqRunReport<const N: usize> {
     pub outcome: RunOutcome<ActionSeq<u256, N>>,
@@ -178,8 +193,10 @@ fn stateful_shrink_infrastructure<const N: usize>(
 
 fn evaluate_stateful_once<
     const N: usize,
+    R: Copy,
     P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
-    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+    X: Fn(StatefulActionSeqRequest<N>) -> R,
+    V: Fn(StatefulEvaluationVerificationRequest<N, R>) -> StatefulEvaluationReceipt,
 >(
     _ config: RunConfig,
     _ value: ActionSeq<u256, N>,
@@ -189,8 +206,9 @@ fn evaluate_stateful_once<
     _ prior_shrink: ShrinkStats,
     _ preflight: P,
     _ evaluate: X,
+    _ verify: V,
 ) -> StatefulEvaluationStep
-uses (P::E, X::E)
+uses (P::E, X::E, V::E)
 {
     var proposal_stats = prior_stats
     var required_deployments: u256 = 0
@@ -241,7 +259,11 @@ uses (P::E, X::E)
     }
     stats.property_evaluations += 1
 
-    let receipt = evaluate(StatefulActionSeqRequest { value, context })
+    let request = StatefulActionSeqRequest { value, context }
+    let unverified = evaluate(request)
+    let receipt = verify(
+        StatefulEvaluationVerificationRequest { request, receipt: unverified },
+    )
     stats.contract_deployments += required_deployments
 
     let logical_len = action_seq_len(value) as u256
@@ -280,21 +302,26 @@ uses (P::E, X::E)
 
 fn shrink_u256_action_seq_stateful_prevalidated<
     const N: usize,
+    R: Copy,
     P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
-    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+    X: Fn(StatefulActionSeqRequest<N>) -> R,
+    V: Fn(StatefulEvaluationVerificationRequest<N, R>) -> StatefulEvaluationReceipt,
 >(
     _ strategy: U256ActionSeqStrategy<N>,
     _ original: ActionSeq<u256, N>,
     _ failure: FailureKey,
     _ master_seed: u256,
-    _ run_id: u256,
+    _ semantic_run_fingerprint: u256,
+    _ fixture_domain: u256,
+    _ execution_namespace: u256,
     _ attempt_index: u256,
     _ config: RunConfig,
     _ starting_stats: RunStats,
     _ preflight: P,
     _ evaluate: X,
+    _ verify: V,
 ) -> StatefulU256ActionSeqShrinkResult<N>
-uses (P::E, X::E)
+uses (P::E, X::E, V::E)
 {
     var run_stats = starting_stats
     var shrink = empty_shrink_stats()
@@ -353,9 +380,11 @@ uses (P::E, X::E)
                 }
 
                 let context = StatefulEvaluationContext {
-                    run_fingerprint: run_id,
+                    run_fingerprint: semantic_run_fingerprint,
                     suite_id: config.suite_id,
                     run_namespace: config.namespace,
+                    execution_namespace,
+                    fixture_domain,
                     master_seed,
                     attempt_index,
                     local_evaluation_index: shrink.evaluations + 1,
@@ -369,6 +398,7 @@ uses (P::E, X::E)
                     shrink,
                     preflight,
                     evaluate,
+                    verify,
                 ) {
                     StatefulEvaluationStep::InfrastructureError {
                         error,
@@ -433,27 +463,30 @@ uses (P::E, X::E)
     )
 }
 
-/// Experimental, non-certified P0 stateful sequence runner.
+/// Ingot-level scheduler core with separate semantic and execution identity.
 ///
-/// The root ingot owns deterministic generation, evaluation identity,
-/// admission, counters, and shrinking. Consumer callbacks own EVM observation,
-/// three direct typed deployments, a fresh local model, and action execution.
-/// The type system forwards those effects but does not prove the callback
-/// protocol. This function therefore does not produce a replay capsule and
-/// must not be described as a certified stateful boundary.
-pub fn check_u256_action_seq_stateful_experimental<
+/// Generation and capsule validation remain bound to `config` and
+/// `semantic_run_fingerprint`. `fixture_domain` and `execution_namespace`
+/// govern only fixture salts and the caller-owned registry claim.
+pub(ingot) fn check_u256_action_seq_stateful_with_execution<
     const N: usize,
+    R: Copy,
     P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
-    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+    X: Fn(StatefulActionSeqRequest<N>) -> R,
+    V: Fn(StatefulEvaluationVerificationRequest<N, R>) -> StatefulEvaluationReceipt,
 >(
     _ strategy: U256ActionSeqStrategy<N>,
     _ master_seed: u256,
     _ config: RunConfig,
     _ registry: StatefulRunRegistry,
+    _ semantic_run_fingerprint: u256,
+    _ fixture_domain: u256,
+    _ execution_namespace: u256,
     _ preflight: P,
     _ evaluate: X,
+    _ verify: V,
 ) -> StatefulActionSeqRunReport<N>
-uses (P::E, X::E)
+uses (P::E, X::E, V::E)
 {
     match validate_run_config_for_codec(config, action_seq_u256_codec_fingerprint()) {
         Option::Some(error) => {
@@ -482,7 +515,7 @@ uses (P::E, X::E)
     let proposed_registry = match stateful_run_registry_claim(
         registry,
         config.suite_id,
-        config.namespace,
+        execution_namespace,
     ) {
         StatefulRunRegistryClaim::Claimed { registry } => registry,
         StatefulRunRegistryClaim::Rejected { error, registry } => {
@@ -492,7 +525,6 @@ uses (P::E, X::E)
     var active_registry = registry
 
     let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
-    let run_id = run_fingerprint(generation, config)
     while stats.valid_cases < config.target_valid_cases {
         let attempt_index = stats.attempts
         let value = match generate_u256_action_seq_attempt(
@@ -507,9 +539,11 @@ uses (P::E, X::E)
             },
         }
         let context = StatefulEvaluationContext {
-            run_fingerprint: run_id,
+            run_fingerprint: semantic_run_fingerprint,
             suite_id: config.suite_id,
             run_namespace: config.namespace,
+            execution_namespace,
+            fixture_domain,
             master_seed,
             attempt_index,
             local_evaluation_index: 0,
@@ -523,6 +557,7 @@ uses (P::E, X::E)
             empty_shrink_stats(),
             preflight,
             evaluate,
+            verify,
         ) {
             StatefulEvaluationStep::InfrastructureError {
                 error,
@@ -566,12 +601,15 @@ uses (P::E, X::E)
                     value,
                     failure,
                     master_seed,
-                    run_id,
+                    semantic_run_fingerprint,
+                    fixture_domain,
+                    execution_namespace,
                     attempt_index,
                     config,
                     stats,
                     preflight,
                     evaluate,
+                    verify,
                 ) {
                     StatefulU256ActionSeqShrinkResult::Complete {
                         minimal,
@@ -608,4 +646,42 @@ uses (P::E, X::E)
     }
 
     stateful_action_seq_report(RunOutcome::Passed { stats }, active_registry)
+}
+
+/// Experimental, non-certified P0 stateful sequence runner.
+///
+/// The root ingot owns deterministic generation, evaluation identity,
+/// admission, counters, and shrinking. Consumer callbacks own EVM observation,
+/// three direct typed deployments, a fresh local model, and action execution.
+/// The type system forwards those effects but cannot prove the callback
+/// protocol. This function therefore does not produce a replay capsule and
+/// must not be described as a certified stateful boundary.
+pub fn check_u256_action_seq_stateful_experimental<
+    const N: usize,
+    P: Fn(StatefulFixtureRequest) -> StatefulFixturePreflight,
+    X: Fn(StatefulActionSeqRequest<N>) -> StatefulEvaluationReceipt,
+>(
+    _ strategy: U256ActionSeqStrategy<N>,
+    _ master_seed: u256,
+    _ config: RunConfig,
+    _ registry: StatefulRunRegistry,
+    _ preflight: P,
+    _ evaluate: X,
+) -> StatefulActionSeqRunReport<N>
+uses (P::E, X::E)
+{
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    let run_id = run_fingerprint(generation, config)
+    check_u256_action_seq_stateful_with_execution(
+        strategy,
+        master_seed,
+        config,
+        registry,
+        run_id,
+        run_id,
+        config.namespace,
+        preflight,
+        evaluate,
+        accept_experimental_receipt,
+    )
 }

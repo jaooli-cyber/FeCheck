@@ -1,0 +1,1206 @@
+use ingot::{
+    ERROR_STATEFUL_ADAPTER_MISMATCH,
+    ERROR_STATEFUL_BOUND_CAPSULE_ALGORITHM,
+    ERROR_STATEFUL_BOUND_CAPSULE_EDGE_POLICY,
+    ERROR_STATEFUL_PROTOCOL_MISMATCH,
+    ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH,
+    ERROR_STATEFUL_BOUND_CAPSULE_CAPACITY,
+    ERROR_STATEFUL_BOUND_CAPSULE_DIGEST,
+    ERROR_STATEFUL_BOUND_CAPSULE_FLAGS,
+    ERROR_STATEFUL_BOUND_CAPSULE_FORMAT,
+    ERROR_STATEFUL_BOUND_CAPSULE_MAGIC,
+    ERROR_STATEFUL_BOUND_CAPSULE_STATUS,
+    ERROR_STATEFUL_BOUND_CAPSULE_WORD_COUNT,
+    ERROR_STATEFUL_BOUND_ORIGINAL_DIGEST,
+    ERROR_STATEFUL_BOUND_RECEIPT_ADAPTER,
+    ERROR_STATEFUL_BOUND_RECEIPT_BINDING,
+    ERROR_STATEFUL_BOUND_STATS,
+    ERROR_STATEFUL_EXECUTION_NAMESPACE_REUSED,
+    ERROR_STATEFUL_FIXTURE_PLAN_MISMATCH,
+    ERROR_STATEFUL_REPLAY_DUPLICATE,
+    ERROR_STATEFUL_REPLAY_REGISTRY_FULL,
+    STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1,
+    STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1,
+    STATEFUL_EVIDENCE_FAILURE,
+    STATEFUL_EVIDENCE_REDUCED_DIGEST,
+    STATEFUL_EVIDENCE_RUN_STATS,
+    STATEFUL_EVIDENCE_SHRINK_STATS,
+    ActionSeq,
+    ErrorCode,
+    FailureKey,
+    FixtureRole,
+    PropertyVerdict,
+    RunConfig,
+    RunOutcome,
+    RunStats,
+    ShrinkStats,
+    ShrinkStatus,
+    StatefulActionSeqRequest,
+    StatefulEvaluationContext,
+    StatefulAdapterIdentityV1,
+    StatefulBoundEvaluationReceipt,
+    StatefulBoundRecheckOutcome,
+    StatefulBoundReplayCapsuleV1,
+    StatefulReplayRegistryClaim,
+    StatefulFixturePreflight,
+    StatefulFixtureRequest,
+    U256ActionSeqStrategy,
+    U256Range,
+    action_seq_len,
+    action_seq_try_new,
+    action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_stateful_bound_v1,
+    decode_stateful_bound_capsule_bytes_v1,
+    decode_stateful_bound_capsule_v1,
+    encode_stateful_bound_capsule_bytes_v1,
+    encode_stateful_bound_capsule_v1,
+    generation_fingerprint,
+    recheck_u256_action_seq_stateful_bound_v1,
+    run_fingerprint,
+    stateful_adapter_fingerprint_v1,
+    stateful_bound_binding_fingerprint_v1,
+    stateful_bound_capsule_digest_v1,
+    stateful_bound_receipt_v1,
+    stateful_bound_run_fingerprint_v1,
+    stateful_fixture_evidence_fingerprint_v1,
+    stateful_fixture_salt,
+    stateful_original_execution_fingerprint_v1,
+    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_protocol_fingerprint_v1,
+    stateful_replay_execution_fingerprint_v1,
+    stateful_replay_registry_empty,
+    stateful_replay_registry_claim,
+    stateful_replay_registry_len,
+    stateful_run_registry_empty,
+    u256_action_seq_fingerprint,
+    validate_stateful_bound_stats_v1,
+}
+use std::abi::{Bytes, bytes_from_words}
+use std::evm::keccak_words
+
+const MODE_NORMAL: u256 = 0
+const MODE_PREFLIGHT_ERROR: u256 = 1
+const MODE_CROSSED_RECEIPT: u256 = 2
+const MODE_WRONG_ADAPTER: u256 = 3
+const MODE_PASS_ALL: u256 = 4
+const ERROR_TEST_PREFLIGHT: u256 = 970
+
+struct BoundAudit {
+    mode: u256,
+    preflight_count: u256,
+    evaluation_count: u256,
+    first_run_fingerprint: u256,
+    first_semantic_namespace: u256,
+    first_execution_namespace: u256,
+    first_fixture_domain: u256,
+    first_attempt: u256,
+}
+
+fn empty_audit(_ mode: u256) -> BoundAudit {
+    BoundAudit {
+        mode,
+        preflight_count: 0,
+        evaluation_count: 0,
+        first_run_fingerprint: 0,
+        first_semantic_namespace: 0,
+        first_execution_namespace: 0,
+        first_fixture_domain: 0,
+        first_attempt: 0,
+    }
+}
+
+fn strategy() -> U256ActionSeqStrategy<3> {
+    U256ActionSeqStrategy { action: U256Range { lo: 0, hi: 3, origin: 0 }, max_actions: 3 }
+}
+
+fn config() -> RunConfig {
+    RunConfig {
+        suite_id: 31,
+        namespace: 41,
+        target_valid_cases: 3,
+        max_discards: 0,
+        max_shrink_evaluations: 100,
+        max_state_evaluations: 16,
+        max_deployments: 48,
+        digest_format_version: 1,
+        capsule_format_version: 1,
+        codec_fingerprint: action_seq_u256_codec_fingerprint(),
+    }
+}
+
+fn identity_with_policy(_ policy: u256) -> StatefulAdapterIdentityV1 {
+    StatefulAdapterIdentityV1 {
+        identity_version: 1,
+        protocol_fingerprint: stateful_protocol_fingerprint_v1(),
+        fixture_plan_fingerprint: stateful_p0_fixture_plan_fingerprint_v1(),
+        fixture_policy_fingerprint: policy,
+        action_encoding_fingerprint: action_seq_u256_codec_fingerprint(),
+        model_fingerprint: 102,
+        snapshot_schema_fingerprint: 103,
+        failure_schema_fingerprint: 104,
+        adapter_logic_fingerprint: 105,
+        target_init_code_hash: 106,
+        actor_init_code_hash: 107,
+        target_runtime_code_hash: 108,
+        actor_runtime_code_hash: 109,
+        source_bundle_fingerprint: 110,
+        toolchain_fingerprint: 111,
+    }
+}
+
+fn identity() -> StatefulAdapterIdentityV1 {
+    identity_with_policy(0xabc123)
+}
+
+fn fixture_evidence(
+    _ request: StatefulActionSeqRequest<3>,
+    _ identity: StatefulAdapterIdentityV1,
+) -> u256 {
+    stateful_fixture_evidence_fingerprint_v1(
+        identity,
+        stateful_fixture_salt(request.context, FixtureRole::Target),
+        stateful_fixture_salt(request.context, FixtureRole::ActorA),
+        stateful_fixture_salt(request.context, FixtureRole::ActorB),
+        identity.target_runtime_code_hash,
+        identity.actor_runtime_code_hash,
+        identity.actor_runtime_code_hash,
+    )
+}
+
+fn audited_preflight(_ request: StatefulFixtureRequest) -> StatefulFixturePreflight
+uses (audit: mut BoundAudit)
+{
+    if audit.preflight_count == 0 {
+        audit.first_run_fingerprint = request.context.run_fingerprint
+        audit.first_semantic_namespace = request.context.run_namespace
+        audit.first_execution_namespace = request.context.execution_namespace
+        audit.first_fixture_domain = request.context.fixture_domain
+        audit.first_attempt = request.context.attempt_index
+    }
+    audit.preflight_count += 1
+    if audit.mode == MODE_PREFLIGHT_ERROR {
+        return StatefulFixturePreflight::InfrastructureError {
+            error: ErrorCode { kind: ERROR_TEST_PREFLIGHT, detail: 0 },
+        }
+    }
+    StatefulFixturePreflight::Ready
+}
+
+fn audited_evaluate(_ request: StatefulActionSeqRequest<3>) -> StatefulBoundEvaluationReceipt
+uses (audit: mut BoundAudit)
+{
+    audit.evaluation_count += 1
+    let id = identity()
+    let adapter = stateful_adapter_fingerprint_v1(id)
+    let evidence = fixture_evidence(request, id)
+    var receipt_request = request
+    if audit.mode == MODE_CROSSED_RECEIPT {
+        receipt_request.context.local_evaluation_index += 1
+    }
+
+    let len = action_seq_len(request.value) as u256
+    let verdict = if audit.mode == MODE_PASS_ALL || len < 2 {
+        PropertyVerdict::Pass
+    } else {
+        PropertyVerdict::Fail(FailureKey { kind: 5, detail: 9 })
+    }
+    var receipt = match stateful_bound_receipt_v1(
+        strategy(),
+        receipt_request,
+        adapter,
+        evidence,
+        verdict,
+        len,
+    ) {
+        Result::Ok(receipt) => receipt,
+        Result::Err(_) => {
+            assert!(false)
+            StatefulBoundEvaluationReceipt {
+                verdict: PropertyVerdict::Pass,
+                actions_executed: 0,
+                adapter_fingerprint: 0,
+                fixture_evidence_fingerprint: 0,
+                binding_fingerprint: 0,
+            }
+        },
+    }
+    if audit.mode == MODE_WRONG_ADAPTER {
+        receipt.adapter_fingerprint += 1
+    }
+    receipt
+}
+
+fn produce_capsule() -> StatefulBoundReplayCapsuleV1 {
+    var audit = empty_audit(MODE_NORMAL)
+    let report = with (BoundAudit = mut audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            config(),
+            stateful_run_registry_empty(),
+            identity(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+}
+
+fn empty_capsule() -> StatefulBoundReplayCapsuleV1 {
+    StatefulBoundReplayCapsuleV1 {
+        format_version: 0,
+        algorithm_version: 0,
+        edge_policy_version: 0,
+        protocol_fingerprint: 0,
+        fixture_policy_fingerprint: 0,
+        capacity: 0,
+        suite_id: 0,
+        recorded_namespace: 0,
+        master_seed: 0,
+        attempt_index: 0,
+        attempt_identity: 0,
+        generation_fingerprint: 0,
+        ordinary_run_fingerprint: 0,
+        bound_run_fingerprint: 0,
+        adapter_fingerprint: 0,
+        failure_key: FailureKey { kind: 0, detail: 0 },
+        flags: 0,
+        original_digest: 0,
+        reduced_digest: 0,
+        run_stats: zero_run_stats(),
+        shrink_stats: zero_shrink_stats(),
+        shrink_status: ShrinkStatus::CompleteLocal,
+        capsule_digest: 0,
+    }
+}
+
+fn zero_run_stats() -> RunStats {
+    RunStats {
+        attempts: 0,
+        valid_cases: 0,
+        discards: 0,
+        property_evaluations: 0,
+        fixture_evaluations: 0,
+        contract_deployments: 0,
+        actions_executed: 0,
+    }
+}
+
+fn zero_shrink_stats() -> ShrinkStats {
+    ShrinkStats {
+        evaluations: 0,
+        accepted: 0,
+        rejected_pass: 0,
+        rejected_discard: 0,
+        rejected_failure_key: 0,
+    }
+}
+
+fn assert_incompatible(_ outcome: StatefulBoundRecheckOutcome<3>, _ kind: u256) {
+    match outcome {
+        StatefulBoundRecheckOutcome::Incompatible { error } => assert!(error.kind == kind),
+        _ => assert!(false),
+    }
+}
+
+fn assert_configuration_error(_ outcome: RunOutcome<ActionSeq<u256, 3>>, _ kind: u256) {
+    match outcome {
+        RunOutcome::ConfigurationError { error, stats: _ } => assert!(error.kind == kind),
+        _ => assert!(false),
+    }
+}
+
+fn refresh_wire_digest(
+    _ words: [u256; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1],
+) -> [u256; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1] {
+    var refreshed = words
+    var payload = [0; STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1]
+    var index: usize = 0
+    while index < STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1 {
+        payload[index] = refreshed[index]
+        index += 1
+    }
+    refreshed[STATEFUL_BOUND_CAPSULE_PAYLOAD_WORD_COUNT_V1] = keccak_words(payload)
+    refreshed
+}
+
+#[test]
+fn bound_run_and_full_recheck_keep_semantics_but_use_fresh_execution_identity() {
+    let id = identity()
+    let cfg = config()
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy()))
+    let ordinary = run_fingerprint(generation, cfg)
+    let adapter = stateful_adapter_fingerprint_v1(id)
+    let bound = stateful_bound_run_fingerprint_v1(ordinary, adapter, id.fixture_policy_fingerprint)
+    let original_execution = stateful_original_execution_fingerprint_v1(bound, cfg.namespace)
+
+    var original_audit = empty_audit(MODE_NORMAL)
+    let original_report = with (BoundAudit = mut original_audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            cfg,
+            stateful_run_registry_empty(),
+            id,
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    let capsule = match original_report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+    assert!(original_audit.preflight_count == 8)
+    assert!(original_audit.evaluation_count == 8)
+    assert!(original_audit.first_run_fingerprint == bound)
+    assert!(original_audit.first_semantic_namespace == cfg.namespace)
+    assert!(original_audit.first_execution_namespace == cfg.namespace)
+    assert!(original_audit.first_fixture_domain == original_execution)
+    assert!(capsule.bound_run_fingerprint == bound)
+    assert!(
+        capsule.capsule_digest == stateful_bound_capsule_digest_v1(capsule),
+    )
+
+    let replay_namespace: u256 = 99
+    let replay_execution = stateful_replay_execution_fingerprint_v1(
+        bound,
+        capsule.capsule_digest,
+        replay_namespace,
+    )
+    assert!(replay_execution != original_execution)
+    var replay_audit = empty_audit(MODE_NORMAL)
+    let replay_report = with (BoundAudit = mut replay_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            cfg,
+            capsule,
+            id,
+            replay_namespace,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match replay_report.outcome {
+        StatefulBoundRecheckOutcome::Reproduced {
+            original,
+            minimal,
+            stats,
+            shrink,
+            shrink_status,
+        } => {
+            assert!(action_seq_len(original) == 3)
+            assert!(action_seq_len(minimal) == 2)
+            assert!(stats.attempts == 3)
+            assert!(stats.property_evaluations == 8)
+            assert!(stats.fixture_evaluations == 8)
+            assert!(stats.contract_deployments == 24)
+            assert!(stats.actions_executed == 8)
+            assert!(shrink.evaluations == 5)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                _ => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(replay_audit.preflight_count == 8)
+    assert!(replay_audit.evaluation_count == 8)
+    assert!(replay_audit.first_run_fingerprint == bound)
+    assert!(replay_audit.first_semantic_namespace == cfg.namespace)
+    assert!(replay_audit.first_execution_namespace == replay_namespace)
+    assert!(replay_audit.first_fixture_domain == replay_execution)
+    assert!(stateful_replay_registry_len(replay_report.registry) == 1)
+}
+
+#[test]
+fn static_tamper_and_expected_identity_fail_before_callbacks() {
+    let capsule = produce_capsule()
+
+    var crossed_identity = identity()
+    crossed_identity.model_fingerprint += 1
+    var identity_audit = empty_audit(MODE_NORMAL)
+    let identity_report = with (BoundAudit = mut identity_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            crossed_identity,
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(identity_report.outcome, ERROR_STATEFUL_ADAPTER_MISMATCH)
+    assert!(identity_audit.preflight_count == 0)
+    assert!(identity_audit.evaluation_count == 0)
+
+    var digest_tamper = capsule
+    digest_tamper.capsule_digest += 1
+    var digest_audit = empty_audit(MODE_NORMAL)
+    let digest_report = with (BoundAudit = mut digest_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            digest_tamper,
+            identity(),
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(digest_report.outcome, ERROR_STATEFUL_BOUND_CAPSULE_DIGEST)
+    assert!(digest_audit.preflight_count == 0)
+
+    var namespace_audit = empty_audit(MODE_NORMAL)
+    let namespace_report = with (BoundAudit = mut namespace_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            capsule.recorded_namespace,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(
+        namespace_report.outcome,
+        ERROR_STATEFUL_EXECUTION_NAMESPACE_REUSED,
+    )
+    assert!(namespace_audit.preflight_count == 0)
+
+    var original_tamper = capsule
+    original_tamper.original_digest += 1
+    original_tamper.capsule_digest = stateful_bound_capsule_digest_v1(original_tamper)
+    var original_audit = empty_audit(MODE_NORMAL)
+    let original_report = with (BoundAudit = mut original_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            original_tamper,
+            identity(),
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(
+        original_report.outcome,
+        ERROR_STATEFUL_BOUND_ORIGINAL_DIGEST,
+    )
+    assert!(original_audit.preflight_count == 0)
+    assert!(original_audit.evaluation_count == 0)
+
+    var status_tamper = capsule
+    status_tamper.shrink_status = ShrinkStatus::PartialBudget
+    status_tamper.capsule_digest = stateful_bound_capsule_digest_v1(status_tamper)
+    var status_audit = empty_audit(MODE_NORMAL)
+    let status_report = with (BoundAudit = mut status_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            status_tamper,
+            identity(),
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match status_report.outcome {
+        StatefulBoundRecheckOutcome::Incompatible { error } => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_STATS)
+            assert!(error.detail == 15)
+        },
+        _ => assert!(false),
+    }
+    assert!(status_audit.preflight_count == 0)
+}
+
+#[test]
+fn receipt_binding_and_adapter_are_checked_on_every_evaluation() {
+    var crossed_audit = empty_audit(MODE_CROSSED_RECEIPT)
+    let crossed = with (BoundAudit = mut crossed_audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            config(),
+            stateful_run_registry_empty(),
+            identity(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match crossed.outcome {
+        RunOutcome::InfrastructureError { error, stats: _ } => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_RECEIPT_BINDING)
+        },
+        _ => assert!(false),
+    }
+    assert!(crossed_audit.preflight_count == 1)
+    assert!(crossed_audit.evaluation_count == 1)
+    match crossed.capsule {
+        Option::None => {},
+        _ => assert!(false),
+    }
+
+    var adapter_audit = empty_audit(MODE_WRONG_ADAPTER)
+    let wrong_adapter = with (BoundAudit = mut adapter_audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            config(),
+            stateful_run_registry_empty(),
+            identity(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match wrong_adapter.outcome {
+        RunOutcome::InfrastructureError { error, stats: _ } => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_RECEIPT_ADAPTER)
+        },
+        _ => assert!(false),
+    }
+    assert!(adapter_audit.evaluation_count == 1)
+}
+
+#[test]
+fn replay_registry_adoption_is_transactional_and_duplicate_precedes_callbacks() {
+    let capsule = produce_capsule()
+    var failed_audit = empty_audit(MODE_PREFLIGHT_ERROR)
+    let failed = with (BoundAudit = mut failed_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match failed.outcome {
+        StatefulBoundRecheckOutcome::ReplayInfrastructureError { error, stats } => {
+            assert!(error.kind == ERROR_TEST_PREFLIGHT)
+            assert!(stats.property_evaluations == 0)
+        },
+        _ => assert!(false),
+    }
+    assert!(failed_audit.preflight_count == 1)
+    assert!(failed_audit.evaluation_count == 0)
+    assert!(stateful_replay_registry_len(failed.registry) == 0)
+
+    var first_audit = empty_audit(MODE_NORMAL)
+    let first = with (BoundAudit = mut first_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            99,
+            failed.registry,
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert!(stateful_replay_registry_len(first.registry) == 1)
+    var duplicate_audit = empty_audit(MODE_NORMAL)
+    let duplicate = with (BoundAudit = mut duplicate_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            99,
+            first.registry,
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(duplicate.outcome, ERROR_STATEFUL_REPLAY_DUPLICATE)
+    assert!(duplicate_audit.preflight_count == 0)
+    assert!(duplicate_audit.evaluation_count == 0)
+
+    var crossed_audit = empty_audit(MODE_CROSSED_RECEIPT)
+    let crossed = with (BoundAudit = mut crossed_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            100,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match crossed.outcome {
+        StatefulBoundRecheckOutcome::ReplayInfrastructureError { error, stats: _ } => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_RECEIPT_BINDING)
+        },
+        _ => assert!(false),
+    }
+    assert!(crossed_audit.evaluation_count == 1)
+    assert!(stateful_replay_registry_len(crossed.registry) == 1)
+
+    var pass_audit = empty_audit(MODE_PASS_ALL)
+    let not_observed = with (BoundAudit = mut pass_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            101,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match not_observed.outcome {
+        StatefulBoundRecheckOutcome::FailureNotObserved => {},
+        _ => assert!(false),
+    }
+    assert!(pass_audit.evaluation_count == 3)
+    assert!(stateful_replay_registry_len(not_observed.registry) == 1)
+
+    var full_registry = stateful_replay_registry_empty()
+    var index: u256 = 0
+    while index < 8 {
+        full_registry = match stateful_replay_registry_claim(
+            full_registry,
+            index + 1,
+            index + 200,
+        ) {
+            StatefulReplayRegistryClaim::Claimed { registry } => registry,
+            StatefulReplayRegistryClaim::Rejected { error: _, registry } => {
+                assert!(false)
+                registry
+            },
+        }
+        index += 1
+    }
+    var full_audit = empty_audit(MODE_NORMAL)
+    let full = with (BoundAudit = mut full_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            capsule,
+            identity(),
+            102,
+            full_registry,
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_incompatible(full.outcome, ERROR_STATEFUL_REPLAY_REGISTRY_FULL)
+    assert!(full_audit.preflight_count == 0)
+    assert!(full_audit.evaluation_count == 0)
+}
+
+#[test]
+fn full_recheck_detects_exact_evidence_mismatches_after_full_callbacks() {
+    let original = produce_capsule()
+
+    var run_tamper = original
+    run_tamper.run_stats.actions_executed -= 1
+    run_tamper.capsule_digest = stateful_bound_capsule_digest_v1(run_tamper)
+    var run_audit = empty_audit(MODE_NORMAL)
+    let run_report = with (BoundAudit = mut run_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            run_tamper,
+            identity(),
+            99,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match run_report.outcome {
+        StatefulBoundRecheckOutcome::EvidenceMismatch { field } => {
+            assert!(field == STATEFUL_EVIDENCE_RUN_STATS)
+        },
+        _ => assert!(false),
+    }
+    assert!(run_audit.evaluation_count == 8)
+
+    var shrink_tamper = original
+    shrink_tamper.shrink_stats.rejected_pass -= 1
+    shrink_tamper.shrink_stats.rejected_discard += 1
+    shrink_tamper.capsule_digest = stateful_bound_capsule_digest_v1(shrink_tamper)
+    var shrink_audit = empty_audit(MODE_NORMAL)
+    let shrink_report = with (BoundAudit = mut shrink_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            shrink_tamper,
+            identity(),
+            100,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match shrink_report.outcome {
+        StatefulBoundRecheckOutcome::EvidenceMismatch { field } => {
+            assert!(field == STATEFUL_EVIDENCE_SHRINK_STATS)
+        },
+        _ => assert!(false),
+    }
+    assert!(shrink_audit.evaluation_count == 8)
+
+    var failure_tamper = original
+    failure_tamper.failure_key.kind += 1
+    failure_tamper.capsule_digest = stateful_bound_capsule_digest_v1(failure_tamper)
+    var failure_audit = empty_audit(MODE_NORMAL)
+    let failure_report = with (BoundAudit = mut failure_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            failure_tamper,
+            identity(),
+            101,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match failure_report.outcome {
+        StatefulBoundRecheckOutcome::EvidenceMismatch { field } => {
+            assert!(field == STATEFUL_EVIDENCE_FAILURE)
+        },
+        _ => assert!(false),
+    }
+    assert!(failure_audit.evaluation_count == 8)
+
+    var reduced_tamper = original
+    reduced_tamper.reduced_digest += 1
+    reduced_tamper.capsule_digest = stateful_bound_capsule_digest_v1(reduced_tamper)
+    var reduced_audit = empty_audit(MODE_NORMAL)
+    let reduced_report = with (BoundAudit = mut reduced_audit) {
+        recheck_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            config(),
+            reduced_tamper,
+            identity(),
+            102,
+            stateful_replay_registry_empty(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match reduced_report.outcome {
+        StatefulBoundRecheckOutcome::EvidenceMismatch { field } => {
+            assert!(field == STATEFUL_EVIDENCE_REDUCED_DIGEST)
+        },
+        _ => assert!(false),
+    }
+    assert!(reduced_audit.evaluation_count == 8)
+}
+
+#[test]
+fn canonical_fixed_word_and_raw_bytes_wire_round_trip_and_reject_tamper() {
+    let capsule = produce_capsule()
+    assert!(
+        capsule.fixture_policy_fingerprint != stateful_p0_fixture_plan_fingerprint_v1(),
+    )
+    let words = encode_stateful_bound_capsule_v1(capsule)
+    let decoded = match decode_stateful_bound_capsule_v1(words) {
+        Result::Ok(decoded) => decoded,
+        Result::Err(_) => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+    assert!(decoded.capsule_digest == capsule.capsule_digest)
+    assert!(
+        decoded.fixture_policy_fingerprint == capsule.fixture_policy_fingerprint,
+    )
+    assert!(encode_stateful_bound_capsule_v1(decoded) == words)
+
+    let raw = encode_stateful_bound_capsule_bytes_v1(capsule)
+    let raw_decoded = match decode_stateful_bound_capsule_bytes_v1(raw) {
+        Result::Ok(decoded) => decoded,
+        Result::Err(_) => {
+            assert!(false)
+            empty_capsule()
+        },
+    }
+    assert!(raw_decoded.capsule_digest == capsule.capsule_digest)
+
+    var magic_tamper = words
+    magic_tamper[0] += 1
+    match decode_stateful_bound_capsule_v1(magic_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_MAGIC),
+        _ => assert!(false),
+    }
+    var payload_tamper = words
+    payload_tamper[20] += 1
+    match decode_stateful_bound_capsule_v1(payload_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_DIGEST),
+        _ => assert!(false),
+    }
+    var status_tamper = words
+    status_tamper[34] = 2
+    status_tamper = refresh_wire_digest(status_tamper)
+    match decode_stateful_bound_capsule_v1(status_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_STATUS),
+        _ => assert!(false),
+    }
+    var count_tamper = words
+    count_tamper[1] -= 1
+    count_tamper = refresh_wire_digest(count_tamper)
+    match decode_stateful_bound_capsule_v1(count_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_WORD_COUNT),
+        _ => assert!(false),
+    }
+    var version_tamper = words
+    version_tamper[2] += 1
+    version_tamper = refresh_wire_digest(version_tamper)
+    match decode_stateful_bound_capsule_v1(version_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_FORMAT),
+        _ => assert!(false),
+    }
+    var algorithm_tamper = words
+    algorithm_tamper[3] += 1
+    algorithm_tamper = refresh_wire_digest(algorithm_tamper)
+    match decode_stateful_bound_capsule_v1(algorithm_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_ALGORITHM),
+        _ => assert!(false),
+    }
+    var edge_tamper = words
+    edge_tamper[4] += 1
+    edge_tamper = refresh_wire_digest(edge_tamper)
+    match decode_stateful_bound_capsule_v1(edge_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_EDGE_POLICY),
+        _ => assert!(false),
+    }
+    var protocol_tamper = words
+    protocol_tamper[5] += 1
+    protocol_tamper = refresh_wire_digest(protocol_tamper)
+    match decode_stateful_bound_capsule_v1(protocol_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_PROTOCOL_MISMATCH),
+        _ => assert!(false),
+    }
+    var flags_tamper = words
+    flags_tamper[19] = 1
+    flags_tamper = refresh_wire_digest(flags_tamper)
+    match decode_stateful_bound_capsule_v1(flags_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_FLAGS),
+        _ => assert!(false),
+    }
+    var capacity_tamper = words
+    capacity_tamper[7] = 5
+    capacity_tamper = refresh_wire_digest(capacity_tamper)
+    match decode_stateful_bound_capsule_v1(capacity_tamper) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_CAPACITY),
+        _ => assert!(false),
+    }
+
+    match decode_stateful_bound_capsule_bytes_v1(Bytes::empty()) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH),
+        _ => assert!(false),
+    }
+    let truncated = bytes_from_words([0; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 - 1])
+    match decode_stateful_bound_capsule_bytes_v1(truncated) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH),
+        _ => assert!(false),
+    }
+
+    let trailing = bytes_from_words([0; STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 + 1])
+    match decode_stateful_bound_capsule_bytes_v1(trailing) {
+        Result::Err(error) => assert!(error.kind == ERROR_STATEFUL_BOUND_CAPSULE_BYTE_LENGTH),
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn stateful_stats_validator_rejects_impossible_status_and_large_counters_without_overflow() {
+    let capsule = produce_capsule()
+    assert!(
+        validate_stateful_bound_stats_v1(
+            config(),
+            strategy().max_actions as u256,
+            capsule.attempt_index,
+            capsule.run_stats,
+            capsule.shrink_stats,
+            capsule.shrink_status,
+        )
+            .is_none(),
+    )
+    match validate_stateful_bound_stats_v1(
+        config(),
+        3,
+        capsule.attempt_index,
+        capsule.run_stats,
+        capsule.shrink_stats,
+        ShrinkStatus::PartialBudget,
+    ) {
+        Option::Some(error) => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_STATS)
+            assert!(error.detail == 15)
+        },
+        _ => assert!(false),
+    }
+    var huge_actions = capsule.run_stats
+    huge_actions
+        .actions_executed = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    match validate_stateful_bound_stats_v1(
+        config(),
+        3,
+        capsule.attempt_index,
+        huge_actions,
+        capsule.shrink_stats,
+        capsule.shrink_status,
+    ) {
+        Option::Some(error) => assert!(error.detail == 14),
+        _ => assert!(false),
+    }
+    var huge_shrink = capsule.shrink_stats
+    huge_shrink.accepted = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    match validate_stateful_bound_stats_v1(
+        config(),
+        3,
+        capsule.attempt_index,
+        capsule.run_stats,
+        huge_shrink,
+        capsule.shrink_status,
+    ) {
+        Option::Some(error) => assert!(error.detail == 6),
+        _ => assert!(false),
+    }
+    var huge_config = config()
+    huge_config.max_discards = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    var huge_attempt = capsule.run_stats
+    huge_attempt.attempts = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    huge_attempt.valid_cases = 0
+    huge_attempt.discards = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    match validate_stateful_bound_stats_v1(
+        huge_config,
+        3,
+        huge_attempt.attempts - 1,
+        huge_attempt,
+        zero_shrink_stats(),
+        ShrinkStatus::CompleteLocal,
+    ) {
+        Option::Some(error) => {
+            assert!(error.kind == ERROR_STATEFUL_BOUND_STATS)
+            assert!(error.detail == 4)
+        },
+        _ => assert!(false),
+    }
+}
+
+#[test]
+fn identity_policy_fixture_evidence_and_execution_domains_are_independent() {
+    let first = identity_with_policy(0xabc123)
+    let second = identity_with_policy(0xabc124)
+    let first_adapter = stateful_adapter_fingerprint_v1(first)
+    let second_adapter = stateful_adapter_fingerprint_v1(second)
+    assert!(first_adapter != second_adapter)
+    let first_bound = stateful_bound_run_fingerprint_v1(
+        7,
+        first_adapter,
+        first.fixture_policy_fingerprint,
+    )
+    let second_bound = stateful_bound_run_fingerprint_v1(
+        7,
+        second_adapter,
+        second.fixture_policy_fingerprint,
+    )
+    assert!(first_bound != second_bound)
+    let original_execution = stateful_original_execution_fingerprint_v1(first_bound, 41)
+    let replay_execution = stateful_replay_execution_fingerprint_v1(first_bound, 99, 42)
+    assert!(original_execution != replay_execution)
+    assert!(
+        replay_execution != stateful_replay_execution_fingerprint_v1(first_bound, 99, 43),
+    )
+
+    let evidence = stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 108, 109, 109)
+    assert!(
+        evidence != stateful_fixture_evidence_fingerprint_v1(first, 4, 2, 3, 108, 109, 109),
+    )
+    assert!(
+        evidence != stateful_fixture_evidence_fingerprint_v1(first, 1, 2, 3, 999, 109, 109),
+    )
+}
+
+#[test]
+fn invalid_generic_plan_precedes_callbacks_and_capsules_exist_only_for_falsification() {
+    var invalid_identity = identity()
+    invalid_identity.fixture_plan_fingerprint += 1
+    var invalid_audit = empty_audit(MODE_NORMAL)
+    let invalid = with (BoundAudit = mut invalid_audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            config(),
+            stateful_run_registry_empty(),
+            invalid_identity,
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    assert_configuration_error(invalid.outcome, ERROR_STATEFUL_FIXTURE_PLAN_MISMATCH)
+    assert!(invalid_audit.preflight_count == 0)
+    assert!(invalid_audit.evaluation_count == 0)
+
+    var pass_audit = empty_audit(MODE_PASS_ALL)
+    let passed = with (BoundAudit = mut pass_audit) {
+        check_u256_action_seq_stateful_bound_v1(
+            strategy(),
+            7,
+            config(),
+            stateful_run_registry_empty(),
+            identity(),
+            audited_preflight,
+            audited_evaluate,
+        )
+    }
+    match passed.outcome {
+        RunOutcome::Passed { stats } => assert!(stats.valid_cases == 3),
+        _ => assert!(false),
+    }
+    match passed.capsule {
+        Option::None => {},
+        _ => assert!(false),
+    }
+}
+
+fn test_sequence(_ len: usize) -> ActionSeq<u256, 3> {
+    match action_seq_try_new([0, 1, 0], len) {
+        Result::Ok(value) => value,
+        Result::Err(_) => {
+            assert!(false)
+            match action_seq_try_new([0, 0, 0], 0) {
+                Result::Ok(value) => value,
+                Result::Err(_) => {
+                    assert!(false)
+                    test_sequence(0)
+                },
+            }
+        },
+    }
+}
+
+fn binding_for(
+    _ request: StatefulActionSeqRequest<3>,
+    _ adapter: u256,
+    _ evidence: u256,
+    _ verdict: PropertyVerdict,
+    _ actions: u256,
+) -> u256 {
+    match stateful_bound_binding_fingerprint_v1(
+        strategy(),
+        request,
+        adapter,
+        evidence,
+        verdict,
+        actions,
+    ) {
+        Result::Ok(binding) => binding,
+        Result::Err(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn receipt_binding_commits_every_request_dimension_and_candidate_evidence() {
+    let request = StatefulActionSeqRequest {
+        value: test_sequence(1),
+        context: StatefulEvaluationContext {
+            run_fingerprint: 11,
+            suite_id: 12,
+            run_namespace: 13,
+            execution_namespace: 14,
+            fixture_domain: 15,
+            master_seed: 16,
+            attempt_index: 17,
+            local_evaluation_index: 18,
+        },
+    }
+    let base = binding_for(request, 19, 20, PropertyVerdict::Pass, 1)
+    var changed = request
+    changed.context.run_fingerprint += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.fixture_domain += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.suite_id += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.run_namespace += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.execution_namespace += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.master_seed += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.attempt_index += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.context.local_evaluation_index += 1
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    changed = request
+    changed.value = test_sequence(2)
+    assert!(
+        base != binding_for(changed, 19, 20, PropertyVerdict::Pass, 1),
+    )
+    assert!(
+        base != binding_for(request, 21, 20, PropertyVerdict::Pass, 1),
+    )
+    assert!(
+        base != binding_for(request, 19, 21, PropertyVerdict::Pass, 1),
+    )
+    assert!(
+        base
+            != binding_for(
+                request,
+                19,
+                20,
+                PropertyVerdict::Fail(FailureKey { kind: 1, detail: 2 }),
+                1,
+            ),
+    )
+    assert!(
+        base != binding_for(request, 19, 20, PropertyVerdict::Pass, 0),
+    )
+}

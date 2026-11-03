@@ -163,6 +163,8 @@ fn probe_context(_ local_evaluation_index: u256) -> StatefulEvaluationContext {
         run_fingerprint: PROBE_RUN_FINGERPRINT,
         suite_id: 31,
         run_namespace: 41,
+        execution_namespace: 41,
+        fixture_domain: PROBE_RUN_FINGERPRINT,
         master_seed: 7,
         attempt_index: 4,
         local_evaluation_index,

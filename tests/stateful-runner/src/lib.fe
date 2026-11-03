@@ -383,6 +383,8 @@ fn collision_request() -> StatefulActionSeqRequest<3> {
             run_fingerprint: 1,
             suite_id: 51,
             run_namespace: 61,
+            execution_namespace: 61,
+            fixture_domain: 1,
             master_seed: 7,
             attempt_index: 0,
             local_evaluation_index: 0,

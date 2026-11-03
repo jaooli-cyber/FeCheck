@@ -80,7 +80,7 @@ fn expect_claimed(_ claim: StatefulRunRegistryClaim) -> StatefulRunRegistry {
 }
 
 #[test]
-fn fixture_roles_and_every_context_field_bind_the_salt() {
+fn fixture_roles_and_execution_context_fields_bind_the_salt() {
     assert!(
         fixture_role_tag_v1(FixtureRole::Target) == FIXTURE_ROLE_TARGET_V1,
     )
@@ -98,6 +98,8 @@ fn fixture_roles_and_every_context_field_bind_the_salt() {
         run_fingerprint: 11,
         suite_id: 31,
         run_namespace: 41,
+        execution_namespace: 41,
+        fixture_domain: 11,
         master_seed: 7,
         attempt_index: 2,
         local_evaluation_index: 0,
@@ -120,7 +122,7 @@ fn fixture_roles_and_every_context_field_bind_the_salt() {
     var changed = context
     changed.run_fingerprint += 1
     assert!(
-        target != stateful_fixture_salt(changed, FixtureRole::Target),
+        target == stateful_fixture_salt(changed, FixtureRole::Target),
     )
     changed = context
     changed.suite_id += 1
@@ -129,6 +131,16 @@ fn fixture_roles_and_every_context_field_bind_the_salt() {
     )
     changed = context
     changed.run_namespace += 1
+    assert!(
+        target == stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.execution_namespace += 1
+    assert!(
+        target != stateful_fixture_salt(changed, FixtureRole::Target),
+    )
+    changed = context
+    changed.fixture_domain += 1
     assert!(
         target != stateful_fixture_salt(changed, FixtureRole::Target),
     )
@@ -152,6 +164,8 @@ fn fixture_roles_and_every_context_field_bind_the_salt() {
         run_fingerprint: 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b,
         suite_id: 31,
         run_namespace: 41,
+        execution_namespace: 41,
+        fixture_domain: 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b,
         master_seed: 7,
         attempt_index: 4,
         local_evaluation_index: 0,
