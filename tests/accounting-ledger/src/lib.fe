@@ -1,22 +1,47 @@
 pub use action::*
 pub use contracts::*
 pub use harness::*
+pub use manifest::*
 pub use model::*
 
 use fecheck::{
     ActionSeq,
+    FailureKey,
     GenerationResult,
+    ERROR_STATEFUL_ADAPTER_MISMATCH,
+    ERROR_STATEFUL_REPLAY_DUPLICATE,
     PropertyVerdict,
     RunOutcome,
+    RunStats,
+    ShrinkStats,
     ShrinkStatus,
     StatefulActionSeqRequest,
+    StatefulBoundActionSeqRunReport,
+    StatefulBoundRecheckOutcome,
+    StatefulBoundReplayCapsuleV1,
+    STATEFUL_BOUND_CAPSULE_BYTE_COUNT_V1,
+    STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1,
     StatefulEvaluationContext,
     action_seq_empty,
     action_seq_get,
     action_seq_len,
     action_seq_try_new,
+    decode_stateful_bound_capsule_bytes_v1,
+    encode_stateful_bound_capsule_bytes_v1,
+    encode_stateful_bound_capsule_v1,
     generate_u256_action_seq_attempt,
     generation_fingerprint,
+    run_fingerprint,
+    stateful_adapter_fingerprint_v1,
+    stateful_bound_capsule_digest_v1,
+    stateful_bound_run_fingerprint_v1,
+    stateful_original_execution_fingerprint_v1,
+    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_protocol_fingerprint_v1,
+    stateful_replay_execution_fingerprint_v1,
+    stateful_replay_registry_contains,
+    stateful_replay_registry_empty,
+    stateful_replay_registry_len,
     stateful_run_registry_contains,
     stateful_run_registry_empty,
     stateful_run_registry_len,
@@ -28,6 +53,18 @@ use std::evm::Evm
 const LEDGER_SCALAR_FINGERPRINT_V1: u256 = 0xd2ea76fb4727d2d963519393fbd3da268fefd347649838588a14f0733cb38135
 const LEDGER_ACTION_SEQ_FINGERPRINT_V1: u256 = 0x6ae4aa2ef26a8849817c65b1076ba384ca37d5dc5411c5ea95e0e149669f2a43
 const LEDGER_GENERATION_FINGERPRINT_V1: u256 = 0xf725d808dea501290fa02d43b07786393c747a511c813d737ec264f40daed6f7
+
+const LEDGER_RUN_FINGERPRINT_V1: u256 = 0xedc064b8116a6def4ef7a8c49f3801a909a90d7007ad08e0443415c4cb5678e2
+const LEDGER_ORIGINAL_DIGEST_V1: u256 = 0x6e62a2972970be70cf7e1196ad1fc9c0594cf5553c801705ac44139677989a4f
+const LEDGER_REDUCED_DIGEST_V1: u256 = 0xfb7dfe56f9f0dcfd649005d929177699c1edfb58ec19e81a90adb8a24cef0f2e
+const LEDGER_STATEFUL_PROTOCOL_FINGERPRINT_V1: u256 = 0xc79098012a110203d44db589835ef53d508b3631ca34432c109ce1c0f65f9c59
+const LEDGER_STATEFUL_FIXTURE_PLAN_FINGERPRINT_V1: u256 = 0x9d3f8baf2a94f15ffbf65420ddd54bc32f46b0d6672ef0a410d45e6ddd1fbac9
+const LEDGER_BUGGY_ADAPTER_FINGERPRINT_V1: u256 = 0x074365e010d55b454bda6cffd10c9fd83f62290417f5581a6dd6f132835d8d7f
+const LEDGER_FIXED_ADAPTER_FINGERPRINT_V1: u256 = 0x772a61646078d996bd683a17f541c91ea2969e17afcbac0397937d2c4889e930
+const LEDGER_BOUND_RUN_FINGERPRINT_V1: u256 = 0x69f5e944243cae3a6d2568006c31fd07b183d55e5747960e508a94db509779ec
+const LEDGER_ORIGINAL_EXECUTION_FINGERPRINT_V1: u256 = 0xd8759fd98c87d828e1b7497c3e2118105885b49c53eca3eb9d46c1f3324d6fff
+const LEDGER_BOUND_CAPSULE_DIGEST_V1: u256 = 0x00631848a15b7b3a045f41b45002725bb7ac460ec9a5e76be88e3a3b229ebe45
+const LEDGER_REPLAY_EXECUTION_FINGERPRINT_V1: u256 = 0xfb5bf10a0a82085365c91024ca408259a08a3673bd91ee6413082803aae8e128
 
 fn expect_sequence(
     _ sequence: ActionSeq<u256, 3>,
@@ -80,6 +117,8 @@ fn direct_context(_ namespace: u256) -> StatefulEvaluationContext {
         run_fingerprint: 0x4c454447444952454354,
         suite_id: LEDGER_SUITE_ID_V1,
         run_namespace: namespace,
+        execution_namespace: namespace,
+        fixture_domain: 0x4c454447444952454354,
         master_seed: LEDGER_MASTER_SEED_V1,
         attempt_index: 0,
         local_evaluation_index: 0,
@@ -93,6 +132,73 @@ fn expect_snapshot(_ result: LedgerSnapshotResult) -> LedgerSnapshot {
             assert!(false)
             LedgerSnapshot { balance_a: 0, balance_b: 0, total_shares: 0 }
         },
+    }
+}
+
+fn expect_bound_capsule(
+    _ report: StatefulBoundActionSeqRunReport<3>,
+) -> StatefulBoundReplayCapsuleV1 {
+    match report.capsule {
+        Option::Some(capsule) => capsule,
+        Option::None => {
+            assert!(false)
+            StatefulBoundReplayCapsuleV1 {
+                format_version: 0,
+                algorithm_version: 0,
+                edge_policy_version: 0,
+                protocol_fingerprint: 0,
+                fixture_policy_fingerprint: 0,
+                capacity: 0,
+                suite_id: 0,
+                recorded_namespace: 0,
+                master_seed: 0,
+                attempt_index: 0,
+                attempt_identity: 0,
+                generation_fingerprint: 0,
+                ordinary_run_fingerprint: 0,
+                bound_run_fingerprint: 0,
+                adapter_fingerprint: 0,
+                failure_key: FailureKey { kind: 0, detail: 0 },
+                flags: 0,
+                original_digest: 0,
+                reduced_digest: 0,
+                run_stats: RunStats {
+                    attempts: 0,
+                    valid_cases: 0,
+                    discards: 0,
+                    property_evaluations: 0,
+                    fixture_evaluations: 0,
+                    contract_deployments: 0,
+                    actions_executed: 0,
+                },
+                shrink_stats: ShrinkStats {
+                    evaluations: 0,
+                    accepted: 0,
+                    rejected_pass: 0,
+                    rejected_discard: 0,
+                    rejected_failure_key: 0,
+                },
+                shrink_status: ShrinkStatus::CompleteLocal,
+                capsule_digest: 0,
+            }
+        },
+    }
+}
+
+fn bound_context(
+    _ capsule: StatefulBoundReplayCapsuleV1,
+    _ execution_namespace: u256,
+    _ fixture_domain: u256,
+) -> StatefulEvaluationContext {
+    StatefulEvaluationContext {
+        run_fingerprint: capsule.bound_run_fingerprint,
+        suite_id: capsule.suite_id,
+        run_namespace: capsule.recorded_namespace,
+        execution_namespace,
+        fixture_domain,
+        master_seed: capsule.master_seed,
+        attempt_index: 0,
+        local_evaluation_index: 0,
     }
 }
 
@@ -110,6 +216,69 @@ fn packed_strategy_and_attempt_three_match_the_independent_golden_vector() {
     expect_sequence(generated_attempt(1), 1, 1, 0, 0)
     expect_sequence(generated_attempt(2), 3, 1, 1, 1)
     expect_sequence(generated_attempt(3), 3, 2, 17, 25)
+}
+
+#[test]
+fn adapter_manifests_pin_distinct_contract_builds() {
+    let buggy = buggy_ledger_adapter_identity_v1()
+    let fixed = fixed_ledger_adapter_identity_v1()
+    assert!(
+        stateful_protocol_fingerprint_v1() == LEDGER_STATEFUL_PROTOCOL_FINGERPRINT_V1,
+    )
+    assert!(
+        stateful_p0_fixture_plan_fingerprint_v1() == LEDGER_STATEFUL_FIXTURE_PLAN_FINGERPRINT_V1,
+    )
+    assert!(
+        buggy.source_bundle_fingerprint == LEDGER_SOURCE_BUNDLE_KECCAK_V1,
+    )
+    assert!(
+        fixed.source_bundle_fingerprint == LEDGER_SOURCE_BUNDLE_KECCAK_V1,
+    )
+    assert!(
+        buggy.toolchain_fingerprint == LEDGER_TOOLCHAIN_FINGERPRINT_V1,
+    )
+    assert!(
+        buggy.target_init_code_hash
+            == 0x7b5481653ad9044d751fb34c7505156e43a0d2a93a327b6b1561081cc028a063,
+    )
+    assert!(
+        fixed.target_init_code_hash
+            == 0x6f5b12aa8bef643d95412a7fb7df3628389d697d1186c9849d530f807e3fbec1,
+    )
+    assert!(
+        buggy.actor_init_code_template_hash
+            == 0x109f96d2218de4843ea2f21d4f8b93fc736477a549d26624216f368888863c21,
+    )
+    assert!(
+        buggy.target_runtime_code_hash == LEDGER_BUGGY_RUNTIME_CODE_HASH_V1,
+    )
+    assert!(
+        fixed.target_runtime_code_hash == LEDGER_FIXED_RUNTIME_CODE_HASH_V1,
+    )
+    assert!(
+        buggy.actor_runtime_code_hash == LEDGER_ACTOR_RUNTIME_CODE_HASH_V1,
+    )
+    let buggy_adapter = stateful_adapter_fingerprint_v1(buggy)
+    let fixed_adapter = stateful_adapter_fingerprint_v1(fixed)
+    assert!(buggy_adapter == LEDGER_BUGGY_ADAPTER_FINGERPRINT_V1)
+    assert!(fixed_adapter == LEDGER_FIXED_ADAPTER_FINGERPRINT_V1)
+    assert!(buggy_adapter != fixed_adapter)
+
+    let strategy = ledger_strategy_v1()
+    let generation = generation_fingerprint(u256_action_seq_fingerprint(strategy))
+    let config = ledger_run_config_v1(LEDGER_BUGGY_NAMESPACE_V1)
+    let ordinary_run = run_fingerprint(generation, config)
+    assert!(ordinary_run == LEDGER_RUN_FINGERPRINT_V1)
+    let bound_run = stateful_bound_run_fingerprint_v1(
+        ordinary_run,
+        buggy_adapter,
+        buggy.fixture_policy_fingerprint,
+    )
+    assert!(bound_run == LEDGER_BOUND_RUN_FINGERPRINT_V1)
+    assert!(
+        stateful_original_execution_fingerprint_v1(bound_run, LEDGER_BUGGY_NAMESPACE_V1)
+            == LEDGER_ORIGINAL_EXECUTION_FINGERPRINT_V1,
+    )
 }
 
 #[test]
@@ -272,18 +441,37 @@ uses (evm: mut Evm)
     assert!(snapshot.balance_a == 0)
     assert!(snapshot.balance_b == 0)
     assert!(snapshot.total_shares == 0)
+
+    let mismatch_context = direct_context(107)
+    let mismatch = probe_ledger_runtime_identity_mismatch(
+        StatefulActionSeqRequest {
+            value: explicit_sequence([1, 1, 1], 1),
+            context: mismatch_context,
+        },
+        LedgerTargetVariant::Buggy,
+    )
+    assert!(mismatch.actions_executed == 0)
+    match mismatch.verdict {
+        PropertyVerdict::InfrastructureError(_) => {},
+        _ => assert!(false),
+    }
+    let mismatch_fixture = predicted_ledger_fixture(
+        mismatch_context,
+        evm.address(),
+        LedgerTargetVariant::Buggy,
+    )
+    let mismatch_snapshot = expect_snapshot(observe_ledger_snapshot(mismatch_fixture))
+    assert!(mismatch_snapshot.balance_a == 0)
+    assert!(mismatch_snapshot.balance_b == 0)
+    assert!(mismatch_snapshot.total_shares == 0)
 }
 
 #[test]
-fn buggy_runner_finds_and_locally_shrinks_the_golden_counterexample()
+fn bound_buggy_run_roundtrips_and_rechecks_exactly_with_fresh_fixtures()
 uses (evm: mut Evm)
 {
     let config = ledger_run_config_v1(LEDGER_BUGGY_NAMESPACE_V1)
-    let report = run_accounting_ledger(
-        LedgerTargetVariant::Buggy,
-        LEDGER_BUGGY_NAMESPACE_V1,
-        stateful_run_registry_empty(),
-    )
+    let report = check_accounting_ledger_buggy_bound_v1(stateful_run_registry_empty())
     assert!(stateful_run_registry_len(report.registry) == 1)
     assert!(
         stateful_run_registry_contains(report.registry, config.suite_id, config.namespace),
@@ -313,16 +501,206 @@ uses (evm: mut Evm)
         },
         _ => assert!(false),
     }
+
+    let capsule = expect_bound_capsule(report)
+    assert!(
+        capsule.adapter_fingerprint == LEDGER_BUGGY_ADAPTER_FINGERPRINT_V1,
+    )
+    assert!(capsule.recorded_namespace == LEDGER_BUGGY_NAMESPACE_V1)
+    assert!(capsule.master_seed == LEDGER_MASTER_SEED_V1)
+    assert!(capsule.attempt_index == 3)
+    assert!(capsule.capacity == 3)
+    assert!(
+        capsule.protocol_fingerprint == LEDGER_STATEFUL_PROTOCOL_FINGERPRINT_V1,
+    )
+    assert!(
+        capsule.ordinary_run_fingerprint == LEDGER_RUN_FINGERPRINT_V1,
+    )
+    assert!(
+        capsule.bound_run_fingerprint == LEDGER_BOUND_RUN_FINGERPRINT_V1,
+    )
+    assert!(capsule.original_digest == LEDGER_ORIGINAL_DIGEST_V1)
+    assert!(capsule.reduced_digest == LEDGER_REDUCED_DIGEST_V1)
+    assert!(capsule.capsule_digest == LEDGER_BOUND_CAPSULE_DIGEST_V1)
+    assert!(
+        stateful_bound_capsule_digest_v1(capsule) == LEDGER_BOUND_CAPSULE_DIGEST_V1,
+    )
+    let words = encode_stateful_bound_capsule_v1(capsule)
+    assert!(STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 == 36)
+    assert!(words[1] == STATEFUL_BOUND_CAPSULE_WORD_COUNT_V1 as u256)
+    assert!(words[20] == LEDGER_ORIGINAL_DIGEST_V1)
+    assert!(words[21] == LEDGER_REDUCED_DIGEST_V1)
+    assert!(words[35] == LEDGER_BOUND_CAPSULE_DIGEST_V1)
+
+    let wire = encode_stateful_bound_capsule_bytes_v1(capsule)
+    assert!(wire.len() == STATEFUL_BOUND_CAPSULE_BYTE_COUNT_V1)
+    let decoded = match decode_stateful_bound_capsule_bytes_v1(wire) {
+        Result::Ok(value) => value,
+        Result::Err(_) => {
+            assert!(false)
+            capsule
+        },
+    }
+    assert!(decoded.capsule_digest == capsule.capsule_digest)
+    assert!(decoded.adapter_fingerprint == capsule.adapter_fingerprint)
+    assert!(decoded.original_digest == capsule.original_digest)
+    assert!(decoded.reduced_digest == capsule.reduced_digest)
+
+    let fixed_identity = fixed_ledger_adapter_identity_v1()
+    let fixed_config = ledger_run_config_v1(LEDGER_FIXED_NAMESPACE_V1)
+    let fixed_ordinary_run = run_fingerprint(
+        generation_fingerprint(u256_action_seq_fingerprint(ledger_strategy_v1())),
+        fixed_config,
+    )
+    let fixed_bound_run = stateful_bound_run_fingerprint_v1(
+        fixed_ordinary_run,
+        stateful_adapter_fingerprint_v1(fixed_identity),
+        fixed_identity.fixture_policy_fingerprint,
+    )
+    let fixed_replay_namespace = LEDGER_REPLAY_NAMESPACE_V1 + 1
+    let fixed_execution = stateful_replay_execution_fingerprint_v1(
+        fixed_bound_run,
+        capsule.capsule_digest,
+        fixed_replay_namespace,
+    )
+    let fixed_replay_context = StatefulEvaluationContext {
+        run_fingerprint: fixed_bound_run,
+        suite_id: fixed_config.suite_id,
+        run_namespace: fixed_config.namespace,
+        execution_namespace: fixed_replay_namespace,
+        fixture_domain: fixed_execution,
+        master_seed: capsule.master_seed,
+        attempt_index: 0,
+        local_evaluation_index: 0,
+    }
+    let fixed_replay_fixture = predicted_ledger_fixture(
+        fixed_replay_context,
+        evm.address(),
+        LedgerTargetVariant::Fixed,
+    )
+    assert!(evm.extcodesize(fixed_replay_fixture.target) == 0)
+    assert!(evm.extcodesize(fixed_replay_fixture.actor_a) == 0)
+    assert!(evm.extcodesize(fixed_replay_fixture.actor_b) == 0)
+
+    let fixed_rejection = recheck_accounting_ledger_fixed_bound_v1(
+        capsule,
+        fixed_replay_namespace,
+        stateful_replay_registry_empty(),
+    )
+    assert!(
+        stateful_replay_registry_len(fixed_rejection.registry) == 0,
+    )
+    match fixed_rejection.outcome {
+        StatefulBoundRecheckOutcome::Incompatible { error } => {
+            assert!(error.kind == ERROR_STATEFUL_ADAPTER_MISMATCH)
+        },
+        _ => assert!(false),
+    }
+    assert!(evm.extcodesize(fixed_replay_fixture.target) == 0)
+    assert!(evm.extcodesize(fixed_replay_fixture.actor_a) == 0)
+    assert!(evm.extcodesize(fixed_replay_fixture.actor_b) == 0)
+
+    let original_execution = stateful_original_execution_fingerprint_v1(
+        capsule.bound_run_fingerprint,
+        capsule.recorded_namespace,
+    )
+    assert!(
+        original_execution == LEDGER_ORIGINAL_EXECUTION_FINGERPRINT_V1,
+    )
+    let original_context = bound_context(capsule, capsule.recorded_namespace, original_execution)
+    let original_fixture = predicted_ledger_fixture(
+        original_context,
+        evm.address(),
+        LedgerTargetVariant::Buggy,
+    )
+    assert!(evm.extcodesize(original_fixture.target) != 0)
+    assert!(evm.extcodesize(original_fixture.actor_a) != 0)
+    assert!(evm.extcodesize(original_fixture.actor_b) != 0)
+
+    let replay_execution = stateful_replay_execution_fingerprint_v1(
+        capsule.bound_run_fingerprint,
+        capsule.capsule_digest,
+        LEDGER_REPLAY_NAMESPACE_V1,
+    )
+    assert!(replay_execution == LEDGER_REPLAY_EXECUTION_FINGERPRINT_V1)
+    let replay_context = bound_context(capsule, LEDGER_REPLAY_NAMESPACE_V1, replay_execution)
+    let replay_fixture = predicted_ledger_fixture(
+        replay_context,
+        evm.address(),
+        LedgerTargetVariant::Buggy,
+    )
+    assert!(original_fixture.target != replay_fixture.target)
+    assert!(original_fixture.actor_a != replay_fixture.actor_a)
+    assert!(original_fixture.actor_b != replay_fixture.actor_b)
+    assert!(evm.extcodesize(replay_fixture.target) == 0)
+    assert!(evm.extcodesize(replay_fixture.actor_a) == 0)
+    assert!(evm.extcodesize(replay_fixture.actor_b) == 0)
+
+    let replay = recheck_accounting_ledger_buggy_bound_v1(
+        capsule,
+        LEDGER_REPLAY_NAMESPACE_V1,
+        stateful_replay_registry_empty(),
+    )
+    match replay.outcome {
+        StatefulBoundRecheckOutcome::Reproduced {
+            original,
+            minimal,
+            stats,
+            shrink,
+            shrink_status,
+        } => {
+            expect_sequence(original, 3, 2, 17, 25)
+            expect_sequence(minimal, 2, 1, 17, 0)
+            assert!(stats.attempts == 4)
+            assert!(stats.valid_cases == 3)
+            assert!(stats.discards == 0)
+            assert!(stats.property_evaluations == 22)
+            assert!(stats.fixture_evaluations == 22)
+            assert!(stats.contract_deployments == 66)
+            assert!(stats.actions_executed == 21)
+            assert!(shrink.evaluations == 18)
+            assert!(shrink.accepted == 2)
+            assert!(shrink.rejected_pass == 8)
+            assert!(shrink.rejected_discard == 8)
+            assert!(shrink.rejected_failure_key == 0)
+            match shrink_status {
+                ShrinkStatus::CompleteLocal => {},
+                ShrinkStatus::PartialBudget => assert!(false),
+            }
+        },
+        _ => assert!(false),
+    }
+    assert!(evm.extcodesize(replay_fixture.target) != 0)
+    assert!(evm.extcodesize(replay_fixture.actor_a) != 0)
+    assert!(evm.extcodesize(replay_fixture.actor_b) != 0)
+    assert!(stateful_replay_registry_len(replay.registry) == 1)
+    assert!(
+        stateful_replay_registry_contains(
+            replay.registry,
+            capsule.suite_id,
+            LEDGER_REPLAY_NAMESPACE_V1,
+        ),
+    )
+
+    let duplicate = recheck_accounting_ledger_buggy_bound_v1(
+        capsule,
+        LEDGER_REPLAY_NAMESPACE_V1,
+        replay.registry,
+    )
+    assert!(stateful_replay_registry_len(duplicate.registry) == 1)
+    match duplicate.outcome {
+        StatefulBoundRecheckOutcome::Incompatible { error } => {
+            assert!(error.kind == ERROR_STATEFUL_REPLAY_DUPLICATE)
+        },
+        _ => assert!(false),
+    }
 }
 
 #[test]
 fn fixed_runner_passes_the_same_seed_and_strategy() uses (evm: mut Evm) {
     let config = ledger_run_config_v1(LEDGER_FIXED_NAMESPACE_V1)
-    let report = run_accounting_ledger(
-        LedgerTargetVariant::Fixed,
-        LEDGER_FIXED_NAMESPACE_V1,
-        stateful_run_registry_empty(),
-    )
+    let report = check_accounting_ledger_fixed_bound_v1(stateful_run_registry_empty())
+    assert!(report.capsule.is_none())
     assert!(stateful_run_registry_len(report.registry) == 1)
     assert!(
         stateful_run_registry_contains(report.registry, config.suite_id, config.namespace),

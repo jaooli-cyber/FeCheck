@@ -1,0 +1,63 @@
+use fecheck::{
+    STATEFUL_ADAPTER_IDENTITY_VERSION_V1,
+    StatefulAdapterIdentityV1,
+    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_protocol_fingerprint_v1,
+}
+use std::evm::{Address, init_code_hash}
+
+use super::contracts::{AccountingLedgerBuggy, AccountingLedgerFixed, LedgerActorProxy}
+
+// Canonical pins for the formatted adapter source bundle. manifest.fe is
+// deliberately outside that bundle to avoid self-reference.
+pub const LEDGER_SOURCE_BUNDLE_KECCAK_V1: u256 = 0xe7bf9de220a5c32c42ccba23fc5dae8f67c78c75bc3933f99a63073f1d9e98ee
+pub const LEDGER_SOURCE_BUNDLE_SHA256_V1: u256 = 0x3e5be16563d8f068ebb3acffebb165786e5a8e64f3979fc4be4df8d9a5da5a67
+pub const LEDGER_TOOLCHAIN_FINGERPRINT_V1: u256 = 0x5aeb86a363465c7918ea97437c00f7f80f2863b4b8f7dad5edce728a3c8077a0
+
+pub const LEDGER_ACTION_ENCODING_FINGERPRINT_V1: u256 = 0x67d58f903806ee40c34cff6cb13414aecfb3683f94ddbaaf7496035d09070625
+pub const LEDGER_MODEL_FINGERPRINT_V1: u256 = 0xc1423a868084918f2457dd0d09e75633e135e7b35a854e6bd8dbc65e0815d926
+pub const LEDGER_FIXTURE_POLICY_FINGERPRINT_V1: u256 = 0x8428790e9e9db5de5013ff9db9c9d0f450be0d86247c34bf4854b380c858105a
+pub const LEDGER_FAILURE_SCHEMA_FINGERPRINT_V1: u256 = 0x65242bbd8ded40b90e37ff842f83ccb18bc65bd14242bbd1146fbeeffc5983f0
+pub const LEDGER_SNAPSHOT_SCHEMA_FINGERPRINT_V1: u256 = 0x6d5686d6260d162552aba0c3e17bd7585c780e6cbcdf30197f09fd3c3c562724
+pub const LEDGER_ADAPTER_LOGIC_FINGERPRINT_V1: u256 = 0x6c95e6a147705c2a687d04bf122d69fa31d756405b7d8d9616fad2dee7e11e56
+
+pub const LEDGER_BUGGY_RUNTIME_CODE_HASH_V1: u256 = 0x85638412d87d4195e2a475b23e0a803d8f669e9f23c653de2f6ca7f878487b5f
+pub const LEDGER_FIXED_RUNTIME_CODE_HASH_V1: u256 = 0x607330e267aa0dc7a423da5ae4d8c671fbb05ead67cbb6b977f1d1c3fdff8c21
+pub const LEDGER_ACTOR_RUNTIME_CODE_HASH_V1: u256 = 0x29a05393777217742bb4520ca4779be0ced3806b9c9d0ca6c0cee579a34290cf
+
+fn ledger_adapter_identity_v1(
+    _ target_init_code_hash: u256,
+    _ target_runtime_code_hash: u256,
+) -> StatefulAdapterIdentityV1 {
+    StatefulAdapterIdentityV1 {
+        identity_version: STATEFUL_ADAPTER_IDENTITY_VERSION_V1,
+        protocol_fingerprint: stateful_protocol_fingerprint_v1(),
+        fixture_plan_fingerprint: stateful_p0_fixture_plan_fingerprint_v1(),
+        fixture_policy_fingerprint: LEDGER_FIXTURE_POLICY_FINGERPRINT_V1,
+        action_encoding_fingerprint: LEDGER_ACTION_ENCODING_FINGERPRINT_V1,
+        model_fingerprint: LEDGER_MODEL_FINGERPRINT_V1,
+        snapshot_schema_fingerprint: LEDGER_SNAPSHOT_SCHEMA_FINGERPRINT_V1,
+        failure_schema_fingerprint: LEDGER_FAILURE_SCHEMA_FINGERPRINT_V1,
+        adapter_logic_fingerprint: LEDGER_ADAPTER_LOGIC_FINGERPRINT_V1,
+        target_init_code_hash,
+        actor_init_code_template_hash: init_code_hash<LedgerActorProxy>((Address::zero(),)),
+        target_runtime_code_hash,
+        actor_runtime_code_hash: LEDGER_ACTOR_RUNTIME_CODE_HASH_V1,
+        source_bundle_fingerprint: LEDGER_SOURCE_BUNDLE_KECCAK_V1,
+        toolchain_fingerprint: LEDGER_TOOLCHAIN_FINGERPRINT_V1,
+    }
+}
+
+pub fn buggy_ledger_adapter_identity_v1() -> StatefulAdapterIdentityV1 {
+    ledger_adapter_identity_v1(
+        init_code_hash<AccountingLedgerBuggy>(()),
+        LEDGER_BUGGY_RUNTIME_CODE_HASH_V1,
+    )
+}
+
+pub fn fixed_ledger_adapter_identity_v1() -> StatefulAdapterIdentityV1 {
+    ledger_adapter_identity_v1(
+        init_code_hash<AccountingLedgerFixed>(()),
+        LEDGER_FIXED_RUNTIME_CODE_HASH_V1,
+    )
+}

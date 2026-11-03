@@ -5,22 +5,33 @@ use fecheck::{
     FixtureRole,
     PropertyVerdict,
     RunConfig,
+    StatefulAdapterIdentityV1,
     StatefulActionSeqRequest,
     StatefulActionSeqRunReport,
+    StatefulBoundActionSeqRunReport,
+    StatefulBoundEvaluationReceipt,
+    StatefulBoundRecheckReport,
+    StatefulBoundReplayCapsuleV1,
     StatefulEvaluationContext,
     StatefulEvaluationReceipt,
     StatefulFixturePreflight,
     StatefulFixtureRequest,
+    StatefulReplayRegistry,
     StatefulRunRegistry,
     U256ActionSeqStrategy,
     U256Range,
     action_seq_get,
     action_seq_len,
     action_seq_u256_codec_fingerprint,
+    check_u256_action_seq_stateful_bound_v1,
     check_u256_action_seq_stateful_experimental,
+    recheck_u256_action_seq_stateful_bound_v1,
+    stateful_adapter_fingerprint_v1,
+    stateful_bound_receipt_v1,
     stateful_fixture_salt,
+    stateful_fixture_evidence_fingerprint_v1,
 }
-use std::evm::{Address, Call, Create, Evm, predict_create2}
+use std::evm::{Address, Call, Create, Evm, init_code_hash, predict_create2}
 
 use super::action::{
     LEDGER_ACTION_MAX_V1,
@@ -44,10 +55,12 @@ use super::model::{
     ledger_model_equal,
     preview_ledger_action,
 }
+use super::manifest::{buggy_ledger_adapter_identity_v1, fixed_ledger_adapter_identity_v1}
 
 pub const LEDGER_SUITE_ID_V1: u256 = 0x4c4544470001
 pub const LEDGER_BUGGY_NAMESPACE_V1: u256 = 1
 pub const LEDGER_FIXED_NAMESPACE_V1: u256 = 2
+pub const LEDGER_REPLAY_NAMESPACE_V1: u256 = 3
 pub const LEDGER_MASTER_SEED_V1: u256 = 1608
 
 pub const KIND_LEDGER_INVARIANT: u256 = 0x4c45444701
@@ -68,6 +81,9 @@ const ERROR_LEDGER_SNAPSHOT_ABI: u256 = 0x4c45444716
 const ERROR_LEDGER_INITIAL_STATE: u256 = 0x4c45444717
 const ERROR_LEDGER_ACTION_ABI: u256 = 0x4c45444718
 const ERROR_LEDGER_ACTION_SEQUENCE: u256 = 0x4c45444719
+const ERROR_LEDGER_TARGET_RUNTIME_IDENTITY: u256 = 0x4c4544471a
+const ERROR_LEDGER_ACTOR_A_RUNTIME_IDENTITY: u256 = 0x4c4544471b
+const ERROR_LEDGER_ACTOR_B_RUNTIME_IDENTITY: u256 = 0x4c4544471c
 
 const OBS_BALANCE_A: u256 = 1
 const OBS_BALANCE_B: u256 = 2
@@ -89,6 +105,18 @@ impl Copy for LedgerSalts {}
 pub struct LedgerFixture { pub target: Address, pub actor_a: Address, pub actor_b: Address }
 
 impl Copy for LedgerFixture {}
+
+struct LedgerRuntimeObservation { pub target: u256, pub actor_a: u256, pub actor_b: u256 }
+
+impl Copy for LedgerRuntimeObservation {}
+
+struct LedgerEvaluationResult {
+    pub fixture: LedgerFixture,
+    pub runtime: LedgerRuntimeObservation,
+    pub receipt: StatefulEvaluationReceipt,
+}
+
+impl Copy for LedgerEvaluationResult {}
 
 pub struct LedgerSnapshot { pub balance_a: u256, pub balance_b: u256, pub total_shares: u256 }
 
@@ -265,6 +293,47 @@ uses (evm: mut Evm)
     assert!(evm.extcodesize(actor_a) != 0)
     assert!(evm.extcodesize(actor_b) != 0)
     LedgerFixture { target, actor_a, actor_b }
+}
+
+fn observe_ledger_runtime(_ fixture: LedgerFixture) -> LedgerRuntimeObservation
+uses (evm: mut Evm)
+{
+    LedgerRuntimeObservation {
+        target: evm.extcodehash(fixture.target),
+        actor_a: evm.extcodehash(fixture.actor_a),
+        actor_b: evm.extcodehash(fixture.actor_b),
+    }
+}
+
+fn ledger_adapter_identity_for_variant(
+    _ variant: LedgerTargetVariant,
+) -> StatefulAdapterIdentityV1 {
+    match variant {
+        LedgerTargetVariant::Buggy => buggy_ledger_adapter_identity_v1(),
+        LedgerTargetVariant::Fixed => fixed_ledger_adapter_identity_v1(),
+    }
+}
+
+fn runtime_identity_error(
+    _ observed: LedgerRuntimeObservation,
+    _ identity: StatefulAdapterIdentityV1,
+) -> Option<ErrorCode> {
+    if observed.target != identity.target_runtime_code_hash {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LEDGER_TARGET_RUNTIME_IDENTITY, detail: observed.target },
+        )
+    }
+    if observed.actor_a != identity.actor_runtime_code_hash {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LEDGER_ACTOR_A_RUNTIME_IDENTITY, detail: observed.actor_a },
+        )
+    }
+    if observed.actor_b != identity.actor_runtime_code_hash {
+        return Option::Some(
+            ErrorCode { kind: ERROR_LEDGER_ACTOR_B_RUNTIME_IDENTITY, detail: observed.actor_b },
+        )
+    }
+    Option::None
 }
 
 fn read_binding(_ actor: Address, _ detail: u256) -> LedgerWordResult
@@ -465,6 +534,14 @@ fn infrastructure_receipt(
     )
 }
 
+fn ledger_evaluation_result(
+    _ fixture: LedgerFixture,
+    _ runtime: LedgerRuntimeObservation,
+    _ receipt: StatefulEvaluationReceipt,
+) -> LedgerEvaluationResult {
+    LedgerEvaluationResult { fixture, runtime, receipt }
+}
+
 fn verify_binding(_ actor: Address, _ target: Address, _ detail: u256) -> Option<ErrorCode>
 uses (evm: mut Evm)
 {
@@ -480,6 +557,186 @@ uses (evm: mut Evm)
     }
 }
 
+fn evaluate_ledger_request(
+    _ request: StatefulActionSeqRequest<3>,
+    _ variant: LedgerTargetVariant,
+    _ identity: StatefulAdapterIdentityV1,
+) -> LedgerEvaluationResult
+uses (evm: mut Evm)
+{
+    let fixture = deploy_ledger_fixture(request.context, variant)
+    let runtime = observe_ledger_runtime(fixture)
+    var actions_executed: u256 = 0
+
+    match runtime_identity_error(runtime, identity) {
+        Option::Some(error) => {
+            return ledger_evaluation_result(
+                fixture,
+                runtime,
+                infrastructure_receipt(error, actions_executed),
+            )
+        },
+        Option::None => {},
+    }
+
+    match verify_binding(fixture.actor_a, fixture.target, BINDING_ACTOR_A) {
+        Option::Some(error) => {
+            return ledger_evaluation_result(
+                fixture,
+                runtime,
+                infrastructure_receipt(error, actions_executed),
+            )
+        },
+        Option::None => {},
+    }
+    match verify_binding(fixture.actor_b, fixture.target, BINDING_ACTOR_B) {
+        Option::Some(error) => {
+            return ledger_evaluation_result(
+                fixture,
+                runtime,
+                infrastructure_receipt(error, actions_executed),
+            )
+        },
+        Option::None => {},
+    }
+
+    let initial = match observe_ledger_snapshot(fixture) {
+        LedgerSnapshotResult::Value(snapshot) => snapshot,
+        LedgerSnapshotResult::InfrastructureError(error) => {
+            return ledger_evaluation_result(
+                fixture,
+                runtime,
+                infrastructure_receipt(error, actions_executed),
+            )
+        },
+    }
+    if initial.balance_a != 0 || initial.balance_b != 0 || initial.total_shares != 0 {
+        return ledger_evaluation_result(
+            fixture,
+            runtime,
+            infrastructure_receipt(
+                ErrorCode { kind: ERROR_LEDGER_INITIAL_STATE, detail: 0 },
+                actions_executed,
+            ),
+        )
+    }
+
+    var model = empty_ledger_model()
+    var observed = initial
+    var index: usize = 0
+    let logical_len = action_seq_len(request.value)
+    while index < logical_len {
+        match classify_ledger_snapshot(model, observed) {
+            PropertyVerdict::Pass => {},
+            verdict => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    receipt(verdict, actions_executed),
+                )
+            },
+        }
+
+        let word = match action_seq_get(request.value, index) {
+            Option::Some(value) => value,
+            Option::None => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    infrastructure_receipt(
+                        ErrorCode { kind: ERROR_LEDGER_ACTION_SEQUENCE, detail: index as u256 },
+                        actions_executed,
+                    ),
+                )
+            },
+        }
+        let action = match decode_ledger_action_v1(word) {
+            Option::Some(action) => action,
+            Option::None => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    receipt(PropertyVerdict::Discard, actions_executed),
+                )
+            },
+        }
+        let predicted_next = match preview_ledger_action(model, action) {
+            LedgerPreview::Ready { predicted_next } => predicted_next,
+            LedgerPreview::Discard => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    receipt(PropertyVerdict::Discard, actions_executed),
+                )
+            },
+        }
+
+        actions_executed += 1
+        match execute_action(fixture, action) {
+            LedgerCallResult::Success => {},
+            LedgerCallResult::LogicalFailure(failure) => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    receipt(PropertyVerdict::Fail(failure), actions_executed),
+                )
+            },
+            LedgerCallResult::InfrastructureError(error) => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    infrastructure_receipt(error, actions_executed),
+                )
+            },
+        }
+
+        let post = match observe_ledger_snapshot(fixture) {
+            LedgerSnapshotResult::Value(snapshot) => snapshot,
+            LedgerSnapshotResult::InfrastructureError(error) => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    infrastructure_receipt(error, actions_executed),
+                )
+            },
+        }
+        match classify_ledger_snapshot(predicted_next, post) {
+            PropertyVerdict::Pass => {
+                model = predicted_next
+                observed = post
+            },
+            verdict => {
+                return ledger_evaluation_result(
+                    fixture,
+                    runtime,
+                    receipt(verdict, actions_executed),
+                )
+            },
+        }
+        index += 1
+    }
+
+    ledger_evaluation_result(
+        fixture,
+        runtime,
+        receipt(PropertyVerdict::Pass, actions_executed),
+    )
+}
+
+/// Ingot-internal negative-path probe. It changes only an in-memory copy of
+/// the trusted identity and cannot be used by external consumers.
+pub(ingot) fn probe_ledger_runtime_identity_mismatch(
+    _ request: StatefulActionSeqRequest<3>,
+    _ variant: LedgerTargetVariant,
+) -> StatefulEvaluationReceipt
+uses (evm: mut Evm)
+{
+    var identity = ledger_adapter_identity_for_variant(variant)
+    identity.target_runtime_code_hash += 1
+    let evaluation = evaluate_ledger_request(request, variant, identity)
+    evaluation.receipt
+}
+
 pub struct LedgerEvaluator { pub variant: LedgerTargetVariant }
 
 impl Copy for LedgerEvaluator {}
@@ -491,100 +748,166 @@ impl Fn(StatefulActionSeqRequest<3>) -> _ for LedgerEvaluator {
     fn call(self, _ request: StatefulActionSeqRequest<3>) -> StatefulEvaluationReceipt
     uses E
     {
-        let fixture = deploy_ledger_fixture(request.context, self.variant)
-        var actions_executed: u256 = 0
-
-        match verify_binding(fixture.actor_a, fixture.target, BINDING_ACTOR_A) {
-            Option::Some(error) => {
-                return infrastructure_receipt(error, actions_executed)
-            },
-            Option::None => {},
-        }
-        match verify_binding(fixture.actor_b, fixture.target, BINDING_ACTOR_B) {
-            Option::Some(error) => {
-                return infrastructure_receipt(error, actions_executed)
-            },
-            Option::None => {},
-        }
-
-        let initial = match observe_ledger_snapshot(fixture) {
-            LedgerSnapshotResult::Value(snapshot) => snapshot,
-            LedgerSnapshotResult::InfrastructureError(error) => {
-                return infrastructure_receipt(error, actions_executed)
-            },
-        }
-        if initial.balance_a != 0 || initial.balance_b != 0 || initial.total_shares != 0 {
-            return infrastructure_receipt(
-                ErrorCode { kind: ERROR_LEDGER_INITIAL_STATE, detail: 0 },
-                actions_executed,
-            )
-        }
-
-        var model = empty_ledger_model()
-        var observed = initial
-        var index: usize = 0
-        let logical_len = action_seq_len(request.value)
-        while index < logical_len {
-            match classify_ledger_snapshot(model, observed) {
-                PropertyVerdict::Pass => {},
-                verdict => {
-                    return receipt(verdict, actions_executed)
-                },
-            }
-
-            let word = match action_seq_get(request.value, index) {
-                Option::Some(value) => value,
-                Option::None => {
-                    return infrastructure_receipt(
-                        ErrorCode { kind: ERROR_LEDGER_ACTION_SEQUENCE, detail: index as u256 },
-                        actions_executed,
-                    )
-                },
-            }
-            let action = match decode_ledger_action_v1(word) {
-                Option::Some(action) => action,
-                Option::None => {
-                    return receipt(PropertyVerdict::Discard, actions_executed)
-                },
-            }
-            let predicted_next = match preview_ledger_action(model, action) {
-                LedgerPreview::Ready { predicted_next } => predicted_next,
-                LedgerPreview::Discard => {
-                    return receipt(PropertyVerdict::Discard, actions_executed)
-                },
-            }
-
-            actions_executed += 1
-            match execute_action(fixture, action) {
-                LedgerCallResult::Success => {},
-                LedgerCallResult::LogicalFailure(failure) => {
-                    return receipt(PropertyVerdict::Fail(failure), actions_executed)
-                },
-                LedgerCallResult::InfrastructureError(error) => {
-                    return infrastructure_receipt(error, actions_executed)
-                },
-            }
-
-            let post = match observe_ledger_snapshot(fixture) {
-                LedgerSnapshotResult::Value(snapshot) => snapshot,
-                LedgerSnapshotResult::InfrastructureError(error) => {
-                    return infrastructure_receipt(error, actions_executed)
-                },
-            }
-            match classify_ledger_snapshot(predicted_next, post) {
-                PropertyVerdict::Pass => {
-                    model = predicted_next
-                    observed = post
-                },
-                verdict => {
-                    return receipt(verdict, actions_executed)
-                },
-            }
-            index += 1
-        }
-
-        receipt(PropertyVerdict::Pass, actions_executed)
+        let evaluation = evaluate_ledger_request(
+            request,
+            self.variant,
+            ledger_adapter_identity_for_variant(self.variant),
+        )
+        evaluation.receipt
     }
+}
+
+struct LedgerBoundEvaluator { variant: LedgerTargetVariant, identity: StatefulAdapterIdentityV1 }
+
+impl Copy for LedgerBoundEvaluator {}
+
+impl Fn(StatefulActionSeqRequest<3>) -> _ for LedgerBoundEvaluator {
+    uses E = (evm: mut Evm)
+    type Out = StatefulBoundEvaluationReceipt
+
+    fn call(self, _ request: StatefulActionSeqRequest<3>) -> StatefulBoundEvaluationReceipt
+    uses E
+    {
+        let evaluation = evaluate_ledger_request(request, self.variant, self.identity)
+        let fixture = evaluation.fixture
+        let runtime = evaluation.runtime
+        let ordinary = evaluation.receipt
+        let actor_a_init_code_hash = init_code_hash<LedgerActorProxy>((fixture.target,))
+        let actor_b_init_code_hash = init_code_hash<LedgerActorProxy>((fixture.target,))
+        let adapter = stateful_adapter_fingerprint_v1(self.identity)
+        let evidence = stateful_fixture_evidence_fingerprint_v1(
+            self.identity,
+            fixture.target.word(),
+            fixture.actor_a.word(),
+            fixture.actor_b.word(),
+            actor_a_init_code_hash,
+            actor_b_init_code_hash,
+            runtime.target,
+            runtime.actor_a,
+            runtime.actor_b,
+        )
+        match stateful_bound_receipt_v1(
+            ledger_strategy_v1(),
+            request,
+            adapter,
+            evidence,
+            ordinary.verdict,
+            ordinary.actions_executed,
+        ) {
+            Result::Ok(receipt) => receipt,
+            Result::Err(error) => {
+                assert!(false)
+                StatefulBoundEvaluationReceipt {
+                    verdict: PropertyVerdict::InfrastructureError(error),
+                    actions_executed: ordinary.actions_executed,
+                    adapter_fingerprint: adapter,
+                    fixture_evidence_fingerprint: evidence,
+                    binding_fingerprint: 0,
+                }
+            },
+        }
+    }
+}
+
+fn check_accounting_ledger_bound(
+    _ variant: LedgerTargetVariant,
+    _ namespace: u256,
+    _ identity: StatefulAdapterIdentityV1,
+    _ registry: StatefulRunRegistry,
+) -> StatefulBoundActionSeqRunReport<3>
+uses (evm: mut Evm)
+{
+    check_u256_action_seq_stateful_bound_v1(
+        ledger_strategy_v1(),
+        LEDGER_MASTER_SEED_V1,
+        ledger_run_config_v1(namespace),
+        registry,
+        identity,
+        LedgerPreflight { variant },
+        LedgerBoundEvaluator { variant, identity },
+    )
+}
+
+pub fn check_accounting_ledger_buggy_bound_v1(
+    _ registry: StatefulRunRegistry,
+) -> StatefulBoundActionSeqRunReport<3>
+uses (evm: mut Evm)
+{
+    check_accounting_ledger_bound(
+        LedgerTargetVariant::Buggy,
+        LEDGER_BUGGY_NAMESPACE_V1,
+        buggy_ledger_adapter_identity_v1(),
+        registry,
+    )
+}
+
+pub fn check_accounting_ledger_fixed_bound_v1(
+    _ registry: StatefulRunRegistry,
+) -> StatefulBoundActionSeqRunReport<3>
+uses (evm: mut Evm)
+{
+    check_accounting_ledger_bound(
+        LedgerTargetVariant::Fixed,
+        LEDGER_FIXED_NAMESPACE_V1,
+        fixed_ledger_adapter_identity_v1(),
+        registry,
+    )
+}
+
+fn recheck_accounting_ledger_bound(
+    _ variant: LedgerTargetVariant,
+    _ namespace: u256,
+    _ identity: StatefulAdapterIdentityV1,
+    _ capsule: StatefulBoundReplayCapsuleV1,
+    _ replay_namespace: u256,
+    _ registry: StatefulReplayRegistry,
+) -> StatefulBoundRecheckReport<3>
+uses (evm: mut Evm)
+{
+    recheck_u256_action_seq_stateful_bound_v1(
+        ledger_strategy_v1(),
+        ledger_run_config_v1(namespace),
+        capsule,
+        identity,
+        replay_namespace,
+        registry,
+        LedgerPreflight { variant },
+        LedgerBoundEvaluator { variant, identity },
+    )
+}
+
+pub fn recheck_accounting_ledger_buggy_bound_v1(
+    _ capsule: StatefulBoundReplayCapsuleV1,
+    _ replay_namespace: u256,
+    _ registry: StatefulReplayRegistry,
+) -> StatefulBoundRecheckReport<3>
+uses (evm: mut Evm)
+{
+    recheck_accounting_ledger_bound(
+        LedgerTargetVariant::Buggy,
+        LEDGER_BUGGY_NAMESPACE_V1,
+        buggy_ledger_adapter_identity_v1(),
+        capsule,
+        replay_namespace,
+        registry,
+    )
+}
+
+pub fn recheck_accounting_ledger_fixed_bound_v1(
+    _ capsule: StatefulBoundReplayCapsuleV1,
+    _ replay_namespace: u256,
+    _ registry: StatefulReplayRegistry,
+) -> StatefulBoundRecheckReport<3>
+uses (evm: mut Evm)
+{
+    recheck_accounting_ledger_bound(
+        LedgerTargetVariant::Fixed,
+        LEDGER_FIXED_NAMESPACE_V1,
+        fixed_ledger_adapter_identity_v1(),
+        capsule,
+        replay_namespace,
+        registry,
+    )
 }
 
 pub fn run_accounting_ledger(
