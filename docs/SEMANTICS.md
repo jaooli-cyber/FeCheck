@@ -243,8 +243,9 @@ The implemented stateful foundation does not execute EVM properties. It defines
 a fixed deployment plan, a complete logical evaluation context, the canonical
 fixture salt above, and ingot-internal preflight primitives that check both
 state-evaluation and deployment capacity before committing any work. A rejected
-admission returns the input statistics unchanged. An accepted admission increments only
-`fixture_evaluations` and returns the required deployment count. That count is
+admission returns the input statistics unchanged. An accepted admission
+increments only `fixture_evaluations` and returns the required deployment
+count. That count is
 not a persistent reservation. Before another admission, the future scheduler
 must complete and account for the admitted fixture; inconsistent prior
 `fixture_evaluations` and `contract_deployments` are rejected. Attempts,
@@ -267,6 +268,45 @@ namespace guarantee.
 
 No CREATE2 deployment, proxy actor, model execution, stateful runner, stateful
 capsule, or stateful replay is claimed by this foundation.
+
+## Test-only EVM capability evidence
+
+The separate `tests/evm-probes` ingot depends on the root library but is not
+part of its public API or build roots. It verifies, on Fe 26.5.0, that canonical
+role salts can deploy one mutable target and two target-bound actor proxies. For every
+fixture, all three addresses are predicted and checked for observed code
+occupancy before the first deployment. The deployed addresses equal both
+`predict_create2` and the explicit `create2_address(init_code_hash)` formula,
+including the proxy constructor argument.
+
+Two logical evaluations are deployed in one outer EVM with local indices zero
+and one. Their six tested salts and addresses are distinct. Mutating either
+target leaves the other target's storage unchanged, and each proxy remains
+bound to its own target. Calls through ActorA and ActorB make the target observe
+the corresponding proxy as `ctx.caller()`; recipient identity remains separate,
+including a self-alias case.
+
+This is observational capability evidence, not a universal CREATE2 availability
+proof. A test-local preflight detects nonzero code at an occupied predicted
+address and demonstrates that the other two roles were not deployed. A zero
+`extcodesize` does not prove an account has zero nonce and does not guarantee a
+constructor or CREATE2 will succeed.
+
+A repeated direct typed CREATE2 reverts the outer evaluation. A constructor
+revert is also observed at the outer boundary with an exact selector. A separate
+factory microprobe shows that an enclosing `try_call` can capture both an empty
+collision revert and a constructor payload. The factory is not part of the
+three-contract fixture, its deployments are not included in stateful
+accounting, and that capture path has not been adopted by a runner.
+
+The root ingot emits no deployable contract artifacts; only the separate probe
+ingot contains the five contracts used for this evidence.
+
+These probes do not establish a stateful property adapter, fresh model,
+scheduler, deployment/action statistics, shrinking, capsule, replay, or a fresh
+global EVM. Concrete addresses are test observations only and are not part of a
+fingerprint, failure key, or capsule. See `docs/EVM_PROBES.md` for the evidence
+matrix and reproduction commands.
 
 ## Action sequence boundary
 

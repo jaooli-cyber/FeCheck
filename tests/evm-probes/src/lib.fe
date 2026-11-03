@@ -1,0 +1,636 @@
+use core::abi::load_word
+use fecheck::{
+    FIXTURE_ROLE_ACTOR_A_V1,
+    FIXTURE_ROLE_ACTOR_B_V1,
+    FIXTURE_ROLE_TARGET_V1,
+    FixtureRole,
+    StatefulEvaluationContext,
+    stateful_fixture_salt,
+}
+use std::evm::{
+    Address,
+    Call,
+    Create,
+    Ctx,
+    Evm,
+    RawOps,
+    create2_address,
+    init_code_hash,
+    predict_create2,
+}
+
+const PROBE_RUN_FINGERPRINT: u256 = 0x64ffc2dba5d425a82182294b4cf8501934820f18170611ea948b1d286f566a5b
+const CONSTRUCTOR_REVERT_WORD: u256 = (0xfec0badd as u256) << 224
+
+msg FixtureProbeTargetMsg {
+    #[selector = 0x46454301]
+    Record { recipient: Address, marker: u256 } -> u256,
+    #[selector = 0x46454302]
+    LastCaller -> u256,
+    #[selector = 0x46454303]
+    LastRecipient -> u256,
+    #[selector = 0x46454304]
+    LastMarker -> u256,
+    #[selector = 0x46454305]
+    CallCount -> u256,
+}
+
+struct FixtureProbeTargetStore {
+    last_caller: u256,
+    last_recipient: u256,
+    last_marker: u256,
+    call_count: u256,
+}
+
+pub contract FixtureProbeTarget uses (ctx: Ctx) {
+    mut store: FixtureProbeTargetStore,
+
+    recv FixtureProbeTargetMsg {
+        Record { recipient, marker } -> u256 uses (mut store, ctx) {
+            let caller = ctx.caller().word()
+            store.last_caller = caller
+            store.last_recipient = recipient.word()
+            store.last_marker = marker
+            store.call_count += 1
+            caller
+        }
+        LastCaller -> u256 uses (store) {
+            store.last_caller
+        }
+        LastRecipient -> u256 uses (store) {
+            store.last_recipient
+        }
+        LastMarker -> u256 uses (store) {
+            store.last_marker
+        }
+        CallCount -> u256 uses (store) {
+            store.call_count
+        }
+    }
+}
+
+msg FixtureActorProxyMsg {
+    #[selector = 0x46454310]
+    Relay { recipient: Address, marker: u256 } -> u256,
+    #[selector = 0x46454311]
+    BoundTarget -> Address,
+}
+
+struct FixtureActorProxyStore { target: Address }
+
+pub contract FixtureActorProxy uses (call: mut Call) {
+    mut store: FixtureActorProxyStore,
+
+    init(target: Address) uses (mut store) { store.target = target }
+
+    recv FixtureActorProxyMsg {
+        Relay { recipient, marker } -> u256 uses (store, mut call) {
+            call.call(
+                addr: store.target,
+                gas: 100000,
+                value: Wei::zero(),
+                message: FixtureProbeTargetMsg::Record { recipient, marker },
+            )
+        }
+        BoundTarget -> Address uses (store) {
+            store.target
+        }
+    }
+}
+
+msg CollisionProbeChildMsg {
+    #[selector = 0x46454330]
+    Ping -> u256,
+}
+
+pub contract CollisionProbeChild {
+    recv CollisionProbeChildMsg {
+        Ping -> u256 {
+            1
+        }
+    }
+}
+
+pub contract ConstructorRevertProbe {
+    init(marker: u256) { if marker != 0 {
+            revert(CONSTRUCTOR_REVERT_WORD)
+        } }
+
+    recv CollisionProbeChildMsg {
+        Ping -> u256 {
+            2
+        }
+    }
+}
+
+msg CollisionProbeFactoryMsg {
+    #[selector = 0x46454320]
+    DeployChild { salt: u256 } -> Address,
+    #[selector = 0x46454321]
+    DeployConstructorProbe { salt: u256, marker: u256 } -> Address,
+}
+
+pub contract CollisionProbeFactory uses (create: mut Create) {
+    recv CollisionProbeFactoryMsg {
+        DeployChild { salt } -> Address uses (mut create) {
+            create.create2<CollisionProbeChild>(value: Wei::zero(), args: (), salt)
+        }
+        DeployConstructorProbe { salt, marker } -> Address
+        uses (mut create)
+        {
+            create.create2<ConstructorRevertProbe>(value: Wei::zero(), args: (marker,), salt)
+        }
+    }
+}
+
+struct ProbeSalts { target: u256, actor_a: u256, actor_b: u256 }
+
+impl Copy for ProbeSalts {}
+
+struct ProbeFixture { target: Address, actor_a: Address, actor_b: Address }
+
+impl Copy for ProbeFixture {}
+
+enum ProbePreflight {
+    Available,
+    Occupied { role: u256, addr: Address },
+}
+
+impl Copy for ProbePreflight {}
+
+fn probe_context(_ local_evaluation_index: u256) -> StatefulEvaluationContext {
+    StatefulEvaluationContext {
+        run_fingerprint: PROBE_RUN_FINGERPRINT,
+        suite_id: 31,
+        run_namespace: 41,
+        master_seed: 7,
+        attempt_index: 4,
+        local_evaluation_index,
+    }
+}
+
+fn probe_salts(_ context: StatefulEvaluationContext) -> ProbeSalts {
+    ProbeSalts {
+        target: stateful_fixture_salt(context, FixtureRole::Target),
+        actor_a: stateful_fixture_salt(context, FixtureRole::ActorA),
+        actor_b: stateful_fixture_salt(context, FixtureRole::ActorB),
+    }
+}
+
+fn predicted_probe_fixture(
+    _ context: StatefulEvaluationContext,
+    _ deployer: Address,
+) -> ProbeFixture {
+    let salts = probe_salts(context)
+    let target = predict_create2<FixtureProbeTarget>(deployer, args: (), salt: salts.target)
+    ProbeFixture {
+        target,
+        actor_a: predict_create2<FixtureActorProxy>(deployer, args: (target,), salt: salts.actor_a),
+        actor_b: predict_create2<FixtureActorProxy>(deployer, args: (target,), salt: salts.actor_b),
+    }
+}
+
+fn probe_fixture_preflight(_ fixture: ProbeFixture) -> ProbePreflight
+uses (evm: mut Evm)
+{
+    if evm.extcodesize(fixture.target) != 0 {
+        return ProbePreflight::Occupied { role: FIXTURE_ROLE_TARGET_V1, addr: fixture.target }
+    }
+    if evm.extcodesize(fixture.actor_a) != 0 {
+        return ProbePreflight::Occupied { role: FIXTURE_ROLE_ACTOR_A_V1, addr: fixture.actor_a }
+    }
+    if evm.extcodesize(fixture.actor_b) != 0 {
+        return ProbePreflight::Occupied { role: FIXTURE_ROLE_ACTOR_B_V1, addr: fixture.actor_b }
+    }
+    ProbePreflight::Available
+}
+
+fn assert_preflight_available(_ fixture: ProbeFixture) uses (evm: mut Evm) {
+    match probe_fixture_preflight(fixture) {
+        ProbePreflight::Available => {},
+        ProbePreflight::Occupied { role: _, addr: _ } => assert!(false),
+    }
+}
+
+fn assert_three_salts_distinct(_ salts: ProbeSalts) {
+    assert!(salts.target != salts.actor_a)
+    assert!(salts.target != salts.actor_b)
+    assert!(salts.actor_a != salts.actor_b)
+}
+
+fn assert_three_addresses_distinct(_ fixture: ProbeFixture) {
+    assert!(fixture.target != fixture.actor_a)
+    assert!(fixture.target != fixture.actor_b)
+    assert!(fixture.actor_a != fixture.actor_b)
+}
+
+fn assert_six_salts_distinct(_ first: ProbeSalts, _ second: ProbeSalts) {
+    assert_three_salts_distinct(first)
+    assert_three_salts_distinct(second)
+    assert!(first.target != second.target)
+    assert!(first.target != second.actor_a)
+    assert!(first.target != second.actor_b)
+    assert!(first.actor_a != second.target)
+    assert!(first.actor_a != second.actor_a)
+    assert!(first.actor_a != second.actor_b)
+    assert!(first.actor_b != second.target)
+    assert!(first.actor_b != second.actor_a)
+    assert!(first.actor_b != second.actor_b)
+}
+
+fn assert_six_addresses_distinct(_ first: ProbeFixture, _ second: ProbeFixture) {
+    assert_three_addresses_distinct(first)
+    assert_three_addresses_distinct(second)
+    assert!(first.target != second.target)
+    assert!(first.target != second.actor_a)
+    assert!(first.target != second.actor_b)
+    assert!(first.actor_a != second.target)
+    assert!(first.actor_a != second.actor_a)
+    assert!(first.actor_a != second.actor_b)
+    assert!(first.actor_b != second.target)
+    assert!(first.actor_b != second.actor_a)
+    assert!(first.actor_b != second.actor_b)
+}
+
+fn deploy_probe_fixture(_ context: StatefulEvaluationContext) -> ProbeFixture
+uses (evm: mut Evm)
+{
+    let salts = probe_salts(context)
+    assert_three_salts_distinct(salts)
+    let predicted = predicted_probe_fixture(context, evm.address())
+    assert_three_addresses_distinct(predicted)
+    assert!(predicted.target != evm.address())
+    assert!(predicted.actor_a != evm.address())
+    assert!(predicted.actor_b != evm.address())
+
+    // This is an observational test preflight, not a universal CREATE2
+    // availability guarantee. All three reads happen before the first deploy.
+    assert_preflight_available(predicted)
+
+    let target = evm.create2<FixtureProbeTarget>(value: Wei::zero(), args: (), salt: salts.target)
+    let actor_a = evm
+        .create2<FixtureActorProxy>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_a,
+        )
+    let actor_b = evm
+        .create2<FixtureActorProxy>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_b,
+        )
+
+    assert!(target == predicted.target)
+    assert!(actor_a == predicted.actor_a)
+    assert!(actor_b == predicted.actor_b)
+    assert!(evm.extcodesize(target) != 0)
+    assert!(evm.extcodesize(actor_a) != 0)
+    assert!(evm.extcodesize(actor_b) != 0)
+    ProbeFixture { target, actor_a, actor_b }
+}
+
+fn target_call_count(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: FixtureProbeTargetMsg::CallCount {},
+    )
+}
+
+fn target_last_caller(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: FixtureProbeTargetMsg::LastCaller {},
+    )
+}
+
+fn target_last_recipient(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: FixtureProbeTargetMsg::LastRecipient {},
+    )
+}
+
+fn target_last_marker(_ target: Address) -> u256 uses (evm: mut Evm) {
+    evm.call(
+        addr: target,
+        gas: 100000,
+        value: Wei::zero(),
+        message: FixtureProbeTargetMsg::LastMarker {},
+    )
+}
+
+fn proxy_bound_target(_ actor: Address) -> Address uses (evm: mut Evm) {
+    evm.call(
+        addr: actor,
+        gas: 100000,
+        value: Wei::zero(),
+        message: FixtureActorProxyMsg::BoundTarget {},
+    )
+}
+
+fn relay(_ actor: Address, _ recipient: Address, _ marker: u256) -> u256
+uses (evm: mut Evm)
+{
+    evm.call(
+        addr: actor,
+        gas: 200000,
+        value: Wei::zero(),
+        message: FixtureActorProxyMsg::Relay { recipient, marker },
+    )
+}
+
+#[test]
+fn canonical_role_salts_predict_and_deploy_three_distinct_addresses()
+uses (evm: mut Evm)
+{
+    let context = probe_context(0)
+    let salts = probe_salts(context)
+    assert_three_salts_distinct(salts)
+    let predicted = predicted_probe_fixture(context, evm.address())
+
+    assert!(
+        predicted.target
+            == create2_address(
+                deployer: evm.address(),
+                salt: salts.target,
+                init_code_hash: init_code_hash<FixtureProbeTarget>(()),
+            ),
+    )
+    assert!(
+        predicted.actor_a
+            == create2_address(
+                deployer: evm.address(),
+                salt: salts.actor_a,
+                init_code_hash: init_code_hash<FixtureActorProxy>((predicted.target,)),
+            ),
+    )
+    assert!(
+        predicted.actor_b
+            == create2_address(
+                deployer: evm.address(),
+                salt: salts.actor_b,
+                init_code_hash: init_code_hash<FixtureActorProxy>((predicted.target,)),
+            ),
+    )
+
+    let fixture = deploy_probe_fixture(context)
+    assert!(fixture.target == predicted.target)
+    assert!(fixture.actor_a == predicted.actor_a)
+    assert!(fixture.actor_b == predicted.actor_b)
+    assert!(proxy_bound_target(fixture.actor_a) == fixture.target)
+    assert!(proxy_bound_target(fixture.actor_b) == fixture.target)
+    assert!(target_call_count(fixture.target) == 0)
+    assert!(target_last_caller(fixture.target) == 0)
+    assert!(target_last_recipient(fixture.target) == 0)
+    assert!(target_last_marker(fixture.target) == 0)
+}
+
+#[test]
+fn two_bound_proxy_actors_preserve_caller_and_recipient_identity()
+uses (evm: mut Evm)
+{
+    let fixture = deploy_probe_fixture(probe_context(0))
+    assert!(fixture.actor_a != evm.address())
+    assert!(fixture.actor_b != evm.address())
+
+    let caller_a = relay(fixture.actor_a, fixture.actor_a, 11)
+    assert!(caller_a == fixture.actor_a.word())
+    assert!(
+        target_last_caller(fixture.target) == fixture.actor_a.word(),
+    )
+    assert!(
+        target_last_recipient(fixture.target) == fixture.actor_a.word(),
+    )
+    assert!(target_last_marker(fixture.target) == 11)
+    assert!(target_call_count(fixture.target) == 1)
+
+    let caller_b = relay(fixture.actor_b, fixture.actor_a, 22)
+    assert!(caller_b == fixture.actor_b.word())
+    assert!(
+        target_last_caller(fixture.target) == fixture.actor_b.word(),
+    )
+    assert!(
+        target_last_recipient(fixture.target) == fixture.actor_a.word(),
+    )
+    assert!(target_last_marker(fixture.target) == 22)
+    assert!(target_call_count(fixture.target) == 2)
+
+    let caller_a_again = relay(fixture.actor_a, fixture.actor_b, 33)
+    assert!(caller_a_again == fixture.actor_a.word())
+    assert!(
+        target_last_caller(fixture.target) == fixture.actor_a.word(),
+    )
+    assert!(
+        target_last_recipient(fixture.target) == fixture.actor_b.word(),
+    )
+    assert!(target_last_marker(fixture.target) == 33)
+    assert!(target_call_count(fixture.target) == 3)
+}
+
+#[test]
+fn next_local_evaluation_gets_fresh_contract_state_in_the_same_evm()
+uses (evm: mut Evm)
+{
+    let first_context = probe_context(0)
+    let second_context = probe_context(1)
+    assert_six_salts_distinct(probe_salts(first_context), probe_salts(second_context))
+    assert_six_addresses_distinct(
+        predicted_probe_fixture(first_context, evm.address()),
+        predicted_probe_fixture(second_context, evm.address()),
+    )
+
+    let first = deploy_probe_fixture(first_context)
+    assert!(
+        relay(first.actor_a, first.actor_a, 77) == first.actor_a.word(),
+    )
+    assert!(target_call_count(first.target) == 1)
+
+    let second = deploy_probe_fixture(second_context)
+    assert_six_addresses_distinct(first, second)
+    assert!(proxy_bound_target(first.actor_a) == first.target)
+    assert!(proxy_bound_target(first.actor_b) == first.target)
+    assert!(proxy_bound_target(second.actor_a) == second.target)
+    assert!(proxy_bound_target(second.actor_b) == second.target)
+    assert!(target_call_count(second.target) == 0)
+    assert!(target_last_caller(second.target) == 0)
+    assert!(target_last_recipient(second.target) == 0)
+    assert!(target_last_marker(second.target) == 0)
+
+    assert!(
+        relay(second.actor_b, second.actor_a, 88) == second.actor_b.word(),
+    )
+    assert!(target_call_count(second.target) == 1)
+    assert!(target_last_caller(second.target) == second.actor_b.word())
+    assert!(
+        target_last_recipient(second.target) == second.actor_a.word(),
+    )
+    assert!(target_last_marker(second.target) == 88)
+
+    assert!(target_call_count(first.target) == 1)
+    assert!(target_last_caller(first.target) == first.actor_a.word())
+    assert!(
+        target_last_recipient(first.target) == first.actor_a.word(),
+    )
+    assert!(target_last_marker(first.target) == 77)
+}
+
+#[test]
+fn batch_preflight_detects_an_occupied_last_role_without_partial_fixture()
+uses (evm: mut Evm)
+{
+    let context = probe_context(1)
+    let salts = probe_salts(context)
+    let predicted = predicted_probe_fixture(context, evm.address())
+    assert_preflight_available(predicted)
+
+    let occupied = evm
+        .create2<FixtureActorProxy>(
+            value: Wei::zero(),
+            args: (predicted.target,),
+            salt: salts.actor_b,
+        )
+    assert!(occupied == predicted.actor_b)
+    assert!(evm.extcodesize(predicted.target) == 0)
+    assert!(evm.extcodesize(predicted.actor_a) == 0)
+    assert!(evm.extcodesize(predicted.actor_b) != 0)
+
+    match probe_fixture_preflight(predicted) {
+        ProbePreflight::Occupied { role, addr } => {
+            assert!(role == FIXTURE_ROLE_ACTOR_B_V1)
+            assert!(addr == predicted.actor_b)
+        },
+        ProbePreflight::Available => assert!(false),
+    }
+
+    let no_code_target = evm
+        .try_call(
+            addr: occupied,
+            gas: 200000,
+            value: Wei::zero(),
+            message: FixtureActorProxyMsg::Relay { recipient: occupied, marker: 1 },
+        )
+    assert!(!no_code_target.success())
+    assert!(evm.extcodesize(predicted.target) == 0)
+    assert!(evm.extcodesize(predicted.actor_a) == 0)
+}
+
+#[test]
+fn direct_create2_child_path_succeeds_before_collision_case()
+uses (evm: mut Evm)
+{
+    let child = evm.create2<CollisionProbeChild>(value: Wei::zero(), args: (), salt: 0xd1ec7)
+    assert!(evm.extcodesize(child) != 0)
+    let ping: u256 = evm
+        .call(
+            addr: child,
+            gas: 100000,
+            value: Wei::zero(),
+            message: CollisionProbeChildMsg::Ping {},
+        )
+    assert!(ping == 1)
+}
+
+#[test(should_revert)]
+fn direct_typed_create2_collision_reverts_the_outer_evaluation()
+uses (evm: mut Evm)
+{
+    let salt: u256 = 0xd1ec7
+    evm.create2<CollisionProbeChild>(value: Wei::zero(), args: (), salt)
+    evm.create2<CollisionProbeChild>(value: Wei::zero(), args: (), salt)
+}
+
+#[test]
+fn constructor_probe_positive_path_deploys_and_has_code() uses (evm: mut Evm) {
+    let deployed = evm.create2<ConstructorRevertProbe>(value: Wei::zero(), args: (0,), salt: 0xc057)
+    assert!(evm.extcodesize(deployed) != 0)
+    let ping: u256 = evm
+        .call(
+            addr: deployed,
+            gas: 100000,
+            value: Wei::zero(),
+            message: CollisionProbeChildMsg::Ping {},
+        )
+    assert!(ping == 2)
+}
+
+#[test(should_revert, selector = 0xfec0badd)]
+fn constructor_revert_bubbles_through_direct_typed_create2()
+uses (evm: mut Evm)
+{
+    evm.create2<ConstructorRevertProbe>(value: Wei::zero(), args: (1,), salt: 0xc057)
+}
+
+#[test]
+fn outer_try_call_observes_collision_and_constructor_revert()
+uses (evm: mut Evm)
+{
+    let factory = evm.create2<CollisionProbeFactory>(value: Wei::zero(), args: (), salt: 0xc0111de)
+    assert!(evm.extcodesize(factory) != 0)
+
+    let child_salt: u256 = 99
+    let predicted_child = predict_create2<CollisionProbeChild>(
+        deployer: factory,
+        args: (),
+        salt: child_salt,
+    )
+    let child: Address = evm
+        .call(
+            addr: factory,
+            gas: 500000,
+            value: Wei::zero(),
+            message: CollisionProbeFactoryMsg::DeployChild { salt: child_salt },
+        )
+    assert!(child == predicted_child)
+    let collision = evm
+        .try_call(
+            addr: factory,
+            gas: 500000,
+            value: Wei::zero(),
+            message: CollisionProbeFactoryMsg::DeployChild { salt: child_salt },
+        )
+    assert!(!collision.success())
+    assert!(collision.returndata_len() == 0)
+    assert!(evm.extcodesize(child) != 0)
+
+    let constructor_salt: u256 = 100
+    let predicted_failure = predict_create2<ConstructorRevertProbe>(
+        deployer: factory,
+        args: (1,),
+        salt: constructor_salt,
+    )
+    assert!(evm.extcodesize(predicted_failure) == 0)
+    let constructor_failure = evm
+        .try_call(
+            addr: factory,
+            gas: 500000,
+            value: Wei::zero(),
+            message: CollisionProbeFactoryMsg::DeployConstructorProbe {
+                salt: constructor_salt,
+                marker: 1,
+            },
+        )
+    assert!(!constructor_failure.success())
+    assert!(constructor_failure.returndata_len() == 32)
+    unsafe {
+        assert!(
+            load_word(constructor_failure.returndata().ptr()) == CONSTRUCTOR_REVERT_WORD,
+        )
+    }
+    assert!(evm.extcodesize(predicted_failure) == 0)
+
+    let ping: u256 = evm
+        .call(
+            addr: child,
+            gas: 100000,
+            value: Wei::zero(),
+            message: CollisionProbeChildMsg::Ping {},
+        )
+    assert!(ping == 1)
+}
