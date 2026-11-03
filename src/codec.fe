@@ -1,4 +1,5 @@
 use core::{AsBytes, ByteWriter, keccak}
+use std::evm::packed::Packed
 
 const WORD_BYTES: u256 = 32
 
@@ -198,4 +199,54 @@ pub fn ordered_edges_descriptor(
 
 pub fn u256_codec_fingerprint() -> u256 {
     keccak("FECHECK/CODEC/U256/V1" as String<21>)
+}
+
+/// H(ENCODE(seq)), where lists carry a count and every u256 element carries
+/// its exact 32-byte length. Capacity and the initialized tail are excluded.
+pub(ingot) fn action_seq_u256_logical_descriptor<const N: usize>(
+    _ len: usize,
+    _ items: [u256; N],
+) -> u256 {
+    var packed = Packed::with_capacity(bytes: 32 + len * 64)
+    packed.u256(len as u256)
+    var index: usize = 0
+    while index < len {
+        packed.u256(32)
+        packed.u256(items[index])
+        index += 1
+    }
+    packed.keccak256()
+}
+
+/// Canonical VALUE/V1 digest whose second field is the dynamic logical
+/// ActionSeq encoding itself, not a hash surrogate.
+pub(ingot) fn canonical_action_seq_u256_value_digest<const N: usize>(
+    _ strategy_fingerprint: u256,
+    _ len: usize,
+    _ items: [u256; N],
+) -> u256 {
+    let encoded_len = 32 + len * 64
+    var packed = Packed::with_capacity(bytes: 240 + encoded_len)
+    packed.u256(16)
+    packed.string("FECHECK/VALUE/V1" as String<16>)
+    packed.u256(2)
+
+    packed.u256(1)
+    packed.u256(32)
+    packed.u256(strategy_fingerprint)
+
+    packed.u256(2)
+    packed.u256(encoded_len as u256)
+    packed.u256(len as u256)
+    var index: usize = 0
+    while index < len {
+        packed.u256(32)
+        packed.u256(items[index])
+        index += 1
+    }
+    packed.keccak256()
+}
+
+pub fn action_seq_u256_codec_fingerprint() -> u256 {
+    keccak("FECHECK/CODEC/ACTIONSEQ-U256/V1" as String<31>)
 }

@@ -141,7 +141,7 @@ index, and generation fingerprint. The scalar value digest has two fields:
 strategy fingerprint and value. The U256 codec fingerprint is Keccak-256 of the
 exact ASCII bytes `FECHECK/CODEC/U256/V1`.
 
-The five canonical domains and exact V1 preimage sizes are:
+For the scalar `u256` path, the five canonical domain preimage sizes are:
 
 - `FECHECK/STRATEGY/V1`: 1,043 bytes;
 - `FECHECK/GENERATION/V1`: 373 bytes;
@@ -150,9 +150,11 @@ The five canonical domains and exact V1 preimage sizes are:
 - `FECHECK/VALUE/V1`: 272 bytes.
 
 `tools/oracle_vectors.py` independently constructs every byte, prints each
-preimage, and verifies ten Keccak goldens with PyCryptodome 3.23.0, including
-Bool strategy identities and the seeded full-domain RNG branch. Fe tests also
-mutate every one of the ten strategy fields and eleven run fields individually.
+preimage, and verifies 24 Keccak goldens with PyCryptodome 3.23.0. They cover
+Bool strategy identities, the scalar seeded full-domain RNG branch, ActionSeq
+logical encoding and dynamic value encoding, zero/one/full edge configurations,
+and the complete seed-plus-four-word random sequence chain. Fe tests also mutate
+every scalar strategy and run field individually.
 
 ## Certified replay
 
@@ -210,8 +212,80 @@ and model for every evaluation. That adapter is not implemented in this slice.
 
 ## Action sequence boundary
 
-`ActionSeq<A, N>` is currently a Copy-safe bounded representation. Its digest
-function is named `action_seq_u256_digest_spike` and is intentionally non-wire:
-it demonstrates that capacity and initialized tail bytes can be excluded from a
-logical digest, but it is not the canonical V1 replay codec. Canonical sequence
-generation, shrinking, and stateful evaluation remain pending.
+`ActionSeq<A, N>` stores a fixed initialized array and a private logical
+length. Public code can construct a checked value, read its logical length, and
+request an item only inside the active prefix. It cannot inspect the physical
+tail. The current canonical strategy is deliberately specialized to
+`ActionSeq<u256, N>` with `N <= 4`; this bound is part of V1 behavior, not an
+implicit compiler limit.
+
+The canonical logical encoding is byte-exact:
+
+```text
+ENCODE(seq) = U256(len)
+              || for i = 0..len-1: U256(32) || U256(item[i])
+descriptor  = Keccak256(ENCODE(seq))
+```
+
+The per-item `U256(32)` is the encoded-item byte length. Only `len` and the
+active prefix participate; physical capacity and initialized tail values do
+not. The canonical value digest does not substitute the descriptor for the
+value. Its second tagged field contains `ENCODE(seq)` itself:
+
+```text
+Keccak256(
+  LP("FECHECK/VALUE/V1") || U256(2)
+  || FIELD(1, U256(strategy_fingerprint))
+  || FIELD(2, ENCODE(seq))
+)
+```
+
+`action_seq_u256_digest_spike` remains available only to reproduce prior
+non-wire feasibility evidence and is never used by the canonical path.
+
+The ten sequence-strategy fingerprint fields are:
+
+1. sequence strategy kind (`ActionSeq<u256> V1 = 3`);
+2. no sequence-level bounds descriptor (`0`);
+3. canonical empty-sequence descriptor;
+4. physical capacity `N`;
+5. maximum logical actions;
+6. complete `U256Range` action-strategy fingerprint;
+7. ordered descriptor of the unique sequence edges;
+8. edge-enumeration policy (`V1 = 1`);
+9. shrink-enumeration policy (`V1 = 1`);
+10. value-encoding version (`V1 = 1`).
+
+The unique edges are the empty sequence, one origin action when allowed, and
+`max_actions` origin actions when distinct. Their descriptor is
+`Keccak256(U256(count) || edge_0 || edge_1 || edge_2)`; unused descriptor
+slots are zero. Edges do not consume RNG. A random attempt samples logical
+length first, then invokes the action generator for every physical slot
+`0..N-1`, including inactive slots. Attempt identity and the fresh Keccak RNG
+follow the same master-seed/index/generation-fingerprint derivation as the
+scalar runner. Changing that consumption order requires an algorithm-version
+change.
+
+Candidate order is exact:
+
+1. delete every contiguous block with `block_len = len..1` and
+   `start = 0..len-block_len`;
+2. shrink active actions from left to right using scalar candidate order.
+
+The incremental cursor carries both the validated strategy and its source; the
+next-step API accepts only that cursor, so callers cannot resume enumeration
+under a different strategy. Deletion compacts the active prefix and fills its now-inactive storage with the
+action origin. Duplicate block-deletion candidates are suppressed by exact
+logical equality, never by hash. The structural order is
+`(logical length, ordered action ranks)`, compared directly without lossy
+packing into a `u256`. Exhaustive tests compare every emitted candidate with a
+separate reference enumerator, assert in-domain strict rank reduction and
+uniqueness for all sequences over `0..2` through length three, and exercise a
+1,038-candidate Capacity-4 worst case to completion.
+
+The kernel and its exhaustive small-domain tests are implemented. The future
+sequence runner must still preserve the original `FailureKey`, restart phase 1
+after every accepted candidate, enforce exact budgets/counters, and produce and
+replay a certified sequence capsule. Stateful evaluation must additionally
+create a fresh fixture and model for every candidate. Those layers are not yet
+claimed.
