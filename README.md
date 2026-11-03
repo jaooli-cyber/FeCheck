@@ -1,30 +1,78 @@
 # FeCheck
 
+[![CI](https://github.com/jaooli-cyber/FeCheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jaooli-cyber/FeCheck/actions/workflows/ci.yml)
+
 FeCheck is a deterministic property-testing, replay, and counterexample-shrinking
 toolkit written in Fe for the Fe Builders Challenge.
 
 The executable runner vertical remains deliberately pure: certified `u256`
 range and canonical `ActionSeq<u256, N>` runners produce directly replayable
 failure capsules. Alongside it, an explicitly experimental stateful
-`ActionSeq<u256, N>` runner now owns deterministic scheduling, fresh-evaluation
+`ActionSeq<u256, N>` runner owns deterministic scheduling, fresh-evaluation
 identity, budgets, counters, and failure-key-preserving shrinking for a fixed
-three-contract P0 fixture. Consumer-defined EVM callbacks remain a documented
+three-contract fixture. Consumer-defined EVM callbacks remain a documented
 trust boundary, so this path is not certified.
 
-A separate manifest-bound layer now emits a canonical stateful capsule and
-performs a fresh full-run recheck: it repeats the attempt prefix, failing
-attempt, and shrink path under a distinct execution identity, then compares all
-recorded evidence exactly. On a non-divergent prefix it executes attempts
-`0..attempt_index`; a terminal earlier divergence stops there, and no path ever
-executes a later attempt. This is verified replay, not certification of an arbitrary
-callback.
+A separate manifest-bound layer emits a canonical stateful capsule and performs
+a full-run recheck: it repeats the attempt prefix, failing attempt, and shrink
+path under a distinct execution identity, then compares all recorded evidence
+exactly. On a non-divergent prefix it executes attempts `0..attempt_index`; a
+terminal earlier divergence stops there, and no path ever executes a later
+attempt. This is verified replay, not certification of an arbitrary callback.
 
-The separate AccountingLedger C6a demonstration applies that boundary to a
-two-actor ledger, exposes a self-transfer aliasing defect, and deterministically
-shrinks it to `Deposit(A,1), Transfer(A,A,1)`. A corrected target is exercised
-with the same generated workload. Its specialized wrapper fixes the adapter
-identity, observes runtime code hashes, and exercises the manifest-bound replay
-path without claiming type-level certification.
+The AccountingLedger demonstration applies that boundary to a two-actor ledger,
+exposes a self-transfer aliasing defect, and deterministically shrinks it to
+`Deposit(A,1), Transfer(A,A,1)`. A corrected target is exercised with the same
+generated workload. Its specialized wrapper fixes the adapter identity, observes
+runtime code hashes, and exercises manifest-bound replay without claiming
+type-level certification.
+
+## Assurance at a glance
+
+| Path | Boundary | Replay | Claim |
+| --- | --- | --- | --- |
+| Pure scalar and `ActionSeq` | Effect-free typed property | Direct failing attempt; no prefix execution | FeCheck-certified capsule |
+| Experimental stateful scheduler | Consumer-defined callbacks | Structured run and shrink; no replay capsule | Scheduling and accounting verified; callback effects trusted |
+| Manifest-bound stateful layer | Expected manifest and request-bound receipts | Full-run recheck under a new execution identity | Receipt binding verified; callback effects trusted; not type-certified |
+| AccountingLedger | Fixed adapter and runtime manifest | Distinct fixture addresses in the same outer EVM | Specialized verified evidence; not type-certified |
+
+“Certified” is FeCheck's term for its type-enforced, effect-free property
+boundary. It is not a claim of external certification or a general formal proof
+of contract correctness.
+
+## Quick start
+
+Prerequisite: Fe 26.5.0 (`3dab95f`) on `PATH`. These focused commands exercise
+the smallest certified scalar flow and the complete AccountingLedger demo:
+
+```sh
+fe test . --backend sonatina --profile test -O 1 --jobs 1 \
+  --filter certified_run_replays_without_executing_the_prefix
+
+fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
+```
+
+The flagship demo produces this deterministic evidence:
+
+| Evidence | Result |
+| --- | --- |
+| Original | `[2,17,25]` = `Deposit(A,2), Transfer(A,A,1), Transfer(A,B,1)` |
+| Local minimum | `[1,17]` = `Deposit(A,1), Transfer(A,A,1)` |
+| Comparison | Buggy target falsifies; corrected target passes the same seed and strategy |
+| Run accounting | 22 evaluations, 66 deployments, 21 executed actions |
+| Shrink accounting | 18 evaluations, 2 accepted, 8 pass, 8 discard, 0 other-key |
+
+A minimal independent consumer lives in
+[`examples/quickstart`](examples/quickstart/src/lib.fe). Run it with:
+
+```sh
+fe test examples/quickstart --backend sonatina --profile test -O 1 --jobs 1
+```
+
+For a judge-oriented reading path, continue with the
+[end-to-end ledger test](tests/accounting-ledger/src/lib.fe), the
+[manifest-bound implementation](src/stateful_bound_recheck.fe), and the
+[stateful claim boundary](docs/STATEFUL_RUNNER.md).
 
 ## What works now
 
@@ -89,25 +137,25 @@ path without claiming type-level certification.
   specialized manifest-bound replay that uses fresh fixture addresses and
   reproduces all recorded counters exactly;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
-  for every scalar strategy and run fingerprint field, plus independent C6a
-  fingerprints, RNG draws, model execution, shrink trace, counters, adapter
-  identities, capsule wire, and execution identities;
+  for every scalar strategy and run fingerprint field, plus independent
+  AccountingLedger fingerprints, RNG draws, model execution, shrink trace,
+  counters, adapter identities, capsule wire, and execution identities;
 - an independent eleven-test Python verifier for the AccountingLedger source
   bundle, pinned Fe binary, semantic domains, and declared
   backend/profile/optimization policy.
 
 The root ingot contains 108 passing Fe tests, the isolated EVM capability ingot
 contains 9, the isolated stateful-runner ingot contains 2, and the dedicated
-AccountingLedger ingot contains 15, for 134 passing Fe tests in total. The
-sequence tests include all
-small values in `0..2` at every logical length through three, comparison against
-an independent reference enumerator, exact shrink order and deduplication,
-private-tail independence, capacities zero through the deliberately supported
-maximum of four, termination after all 1,038 worst-case candidates, RNG
-consumption across every physical slot, and canonical assertions backed by
-independent Python vectors, including the sequence run fingerprint, a non-edge
-attempt at index four through its complete RNG chain and value digest, and the
-754-byte fixture-salt preimage. The oracle verifies 32 pre-C6a vectors plus 25
+AccountingLedger ingot contains 15. The independent quickstart adds one more,
+for 135 passing Fe tests in total. The sequence tests include all small values in
+`0..2` at every logical length through three, comparison against an independent
+reference enumerator, exact shrink order and deduplication, private-tail
+independence, capacities zero through the deliberately supported maximum of
+four, termination after all 1,038 worst-case candidates, RNG consumption across
+every physical slot, and canonical assertions backed by independent Python
+vectors, including the sequence run fingerprint, a non-edge attempt at index
+four through its complete RNG chain and value digest, and the 754-byte
+fixture-salt preimage. The oracle verifies 32 core vectors plus 25
 AccountingLedger vectors covering the packed domain, seed 1608 attempt, four
 Keccak draws, exact shrink trace, corrected 8/8 rejection accounting, six exact
 semantic domains, and bound replay identities.
@@ -120,22 +168,39 @@ execution identity, and exact full-run evidence comparison.
 
 ## Verify
 
-FeCheck is pinned to Fe `26.5.0` (`3dab95f`).
+FeCheck is pinned to Fe `26.5.0` (`3dab95f`). On Linux x86-64, install the exact
+binary used by CI and verify it before execution:
 
 ```sh
+fecheck_tool_dir="$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+  -o "$fecheck_tool_dir/fe" \
+  https://github.com/argotorg/fe/releases/download/v26.5.0/fe_linux_amd64
+printf '3732fbe8a6e9d2ea3925d02d0e3a1478bc1e01d742c2be75d3ea7300c46c45f0  %s\n' \
+  "$fecheck_tool_dir/fe" | sha256sum -c -
+chmod +x "$fecheck_tool_dir/fe"
+export PATH="$fecheck_tool_dir:$PATH"
 fe --version
+```
+
+Run the complete Fe suite:
+
+```sh
 fe fmt --check
 fe fmt --check tests/evm-probes
 fe fmt --check tests/stateful-runner
 fe fmt --check tests/accounting-ledger
+fe fmt --check examples/quickstart
 fe check . --profile dev
 fe check tests/evm-probes --profile dev
 fe check tests/stateful-runner --profile dev
 fe check tests/accounting-ledger --profile dev
+fe check examples/quickstart --profile dev
 fe test . --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
 fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
+fe test examples/quickstart --backend sonatina --profile test -O 1 --jobs 1
 ```
 
 The root ingot is a library with no deployable contract. CI runs `fe build`
@@ -185,8 +250,8 @@ python tools/adapter_manifest.py \
   direct sequence replay.
 - `src/stateful.fe`: stateful fixture identity, fixed deployment-plan
   validation, atomic admission, and a caller-owned run registry.
-- `src/stateful_action_seq_runner.fe`: experimental P0 scheduler, effect-row
-  callback boundary, stateful accounting, and shrinking.
+- `src/stateful_action_seq_runner.fe`: experimental stateful scheduler,
+  effect-row callback boundary, stateful accounting, and shrinking.
 - `src/stateful_bound_recheck.fe`: manifest-bound receipts, canonical stateful
   capsule/wire, replay registry, and exact full-run recheck; this is a verified
   boundary, not callback certification.
@@ -194,9 +259,10 @@ python tools/adapter_manifest.py \
   freshness, occupied-address, and revert-boundary evidence.
 - `tests/stateful-runner`: separate ingot containing the full experimental
   scheduler golden and its direct-collision boundary.
-- `tests/accounting-ledger`: separate C6a ingot containing the packed action
-  adapter, pure model, buggy/fixed ledger targets, bound proxies, and EVM
+- `tests/accounting-ledger`: separate demonstration ingot containing the packed
+  action adapter, pure model, buggy/fixed ledger targets, bound proxies, and EVM
   evidence.
+- `examples/quickstart`: independent consumer of the certified scalar API.
 - `src/action_seq_tests.fe`, `src/action_seq_runner_tests.fe`,
   `src/action_seq_capsule_tests.fe`, `src/fixture_identity_tests.fe`, and
   `src/stateful_tests.fe` plus `src/stateful_action_seq_runner_tests.fe`:
@@ -209,27 +275,30 @@ python tools/adapter_manifest.py \
 - `docs/EVM_PROBES.md`: exact EVM evidence and its claim boundary.
 - `docs/STATEFUL_RUNNER.md`: experimental scheduler protocol, evidence, and
   non-certification boundary.
-- `docs/ACCOUNTING_LEDGER.md`: C6a architecture, deterministic witness, shrink
+- `docs/ACCOUNTING_LEDGER.md`: demo architecture, deterministic witness, shrink
   accounting, fixed comparison, and honest claim boundary.
 
 ## Status and limitations
 
-This is a private release candidate. Implementation and verification for the
-current contest scope are complete; repository publication, the final public
-commit reference, and the external submission remain intentionally pending.
+Implementation and verification for the Fe Builders Challenge scope are
+complete. The immutable submission artifact is identified by the `v0.1.0`
+release tag. Repository publication, challenge acceptance, and external
+submission status are recorded by GitHub and the official form rather than
+asserted by this source tree.
+
 The scalar and canonical sequence kernels, pure `FailureKey`-preserving
 runners, certified capsules, and direct replay paths are verified. Canonical
 deployment salts and the pre-EVM state/deployment admission boundary are
 also verified. Test-only EVM probes verify exact deployments, bound callers,
 same-EVM fixture isolation, and the direct CREATE2 revert boundary. The
-experimental scheduler now assigns
-fresh identities to every original and shrink evaluation, enforces its budgets,
-and accounts for its fixed three-deployment fixture and executed-action
-receipts. Its isolated golden exercises a fresh fixture and local model on every
-candidate. AccountingLedger now supplies a concrete model-based consumer and a
-fixed-target comparison with the same deterministic generated sequence.
+experimental scheduler assigns fresh identities to every original and shrink
+evaluation, enforces its budgets, and accounts for its fixed three-deployment
+fixture and executed-action receipts. Its isolated golden exercises a fresh
+fixture and local model on every candidate. AccountingLedger supplies a
+concrete model-based consumer and fixed-target comparison with the same
+generated sequence.
 
-The manifest-bound layer closes the implemented Gate C replay slice: its
+The manifest-bound layer completes the implemented full-run replay slice: its
 identity binds the adapter, policies, code hashes, source bundle, and pinned
 build; its wire is externally serializable and length-exact; and replay repeats
 the complete deterministic run under fresh salts before accepting exact

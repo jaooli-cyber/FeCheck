@@ -65,7 +65,7 @@ use ingot::{
     stateful_fixture_evidence_fingerprint_v1,
     stateful_fixture_salt,
     stateful_original_execution_fingerprint_v1,
-    stateful_p0_fixture_plan_fingerprint_v1,
+    stateful_fixed_fixture_plan_fingerprint_v1,
     stateful_protocol_fingerprint_v1,
     stateful_replay_execution_fingerprint_v1,
     stateful_replay_registry_empty,
@@ -138,7 +138,7 @@ fn identity_with_policy(_ policy: u256) -> StatefulAdapterIdentityV1 {
     StatefulAdapterIdentityV1 {
         identity_version: 1,
         protocol_fingerprint: stateful_protocol_fingerprint_v1(),
-        fixture_plan_fingerprint: stateful_p0_fixture_plan_fingerprint_v1(),
+        fixture_plan_fingerprint: stateful_fixed_fixture_plan_fingerprint_v1(),
         fixture_policy_fingerprint: policy,
         action_encoding_fingerprint: action_seq_u256_codec_fingerprint(),
         model_fingerprint: 102,
@@ -910,7 +910,7 @@ fn full_recheck_detects_exact_evidence_mismatches_after_full_callbacks() {
 fn canonical_fixed_word_and_raw_bytes_wire_round_trip_and_reject_tamper() {
     let capsule = produce_capsule()
     assert!(
-        capsule.fixture_policy_fingerprint != stateful_p0_fixture_plan_fingerprint_v1(),
+        capsule.fixture_policy_fingerprint != stateful_fixed_fixture_plan_fingerprint_v1(),
     )
     let words = encode_stateful_bound_capsule_v1(capsule)
     let decoded = match decode_stateful_bound_capsule_v1(words) {

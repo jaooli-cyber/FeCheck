@@ -16,7 +16,7 @@ pub const ERROR_STATEFUL_RUN_DUPLICATE: u256 = 504
 pub const ERROR_STATEFUL_RUN_REGISTRY_FULL: u256 = 505
 pub const ERROR_STATEFUL_ACCOUNTING_MISMATCH: u256 = 506
 
-/// Stable V1 roles for the three-instance P0 fixture.
+/// Stable V1 roles for the fixed three-instance fixture.
 pub enum FixtureRole {
     Target,
     ActorA,
