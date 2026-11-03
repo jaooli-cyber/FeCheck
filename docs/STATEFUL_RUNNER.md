@@ -6,7 +6,11 @@ Evidence date: 2026-11-03. Toolchain: Fe 26.5.0 (`3dab95f`).
 stateful scheduler. It is deliberately named experimental: the root ingot owns
 deterministic scheduling and accounting, while consumer callbacks own EVM
 observation and execution under a protocol the Fe type system does not prove.
-It is not a certified runner and does not emit a replay capsule.
+It is not a certified runner.
+
+`check_u256_action_seq_stateful_bound_v1` and
+`recheck_u256_action_seq_stateful_bound_v1` add a manifest-bound capsule and a
+verified full-run recheck without changing that callback trust boundary.
 
 ## Fixed P0 boundary
 
@@ -35,8 +39,19 @@ but cannot prove those EVM facts.
 
 ## Evaluation identity and order
 
-The scheduler derives one run fingerprint and creates each context from it,
-the suite/namespace, master seed, attempt index, and local evaluation index.
+The context separates semantic run identity from execution identity. Generation,
+the `RunConfig`, candidate digests, and capsule validation remain tied to the
+semantic namespace. Fixture salts additionally use `fixture_domain` and
+`execution_namespace`.
+
+The legacy experimental runner sets its semantic and execution identities to
+the same values, preserving its original vectors. A bound original run uses:
+
+```text
+bound_run          = H(STATEFUL-RUN/V1, ordinary_run, adapter, fixture_policy)
+original_execution = H(EXEC-ORIGINAL/V1, bound_run, recorded_namespace)
+```
+
 Original attempts use local index zero. Shrink evaluations retain the
 falsifying attempt index and consume dense local indices beginning at one.
 Invalid candidates and candidates rejected before a `Ready` preflight do not
@@ -101,14 +116,99 @@ This transaction avoids consuming one of eight entries when no fixture starts.
 It does not make the registry global or persistent. Replacing it discards its
 history.
 
+## Manifest-bound receipts and capsule
+
+`StatefulAdapterIdentityV1` commits to the root protocol and P0 fixture plan,
+the adapter's concrete fixture policy, action encoding, model, snapshot and
+failure schemas, adapter logic, target initcode/runtime, actor-template
+initcode/runtime, source bundle, and toolchain/build profile. The actor initcode
+field is explicitly the template hash for `Address::zero()`; concrete fixture
+evidence carries the two real actor initcode hashes instantiated with that
+fixture's target. The expected identity is a trusted local input. The capsule
+cannot appoint its own authority.
+
+A bound evaluator returns a `StatefulBoundEvaluationReceipt`. Its binding
+fingerprint commits to:
+
+- adapter and bound-run fingerprints;
+- semantic and execution namespaces and the execution fingerprint carried as
+  `fixture_domain`;
+- suite, master seed, attempt index, and local evaluation index;
+- canonical candidate digest;
+- fixture-evidence fingerprint;
+- verdict, failure/error detail where applicable, and actions executed.
+
+The generic verifier checks that binding before ordinary scheduler accounting.
+The AccountingLedger specialization constructs fixture evidence from the three
+deployed addresses, both actual actor initcode hashes, and their three observed
+`extcodehash` values. It compares the runtime hashes before any binding, state,
+or action check. An arbitrary callback can still lie consistently, which is why
+the generic API says bound and verified rather than certified.
+
+A falsified bound run emits `StatefulBoundReplayCapsuleV1`. The canonical V1
+wire is exactly 36 big-endian words (1,152 bytes):
+
+```text
+0      stateful capsule domain/magic
+1      word_count = 36
+2..34  versions, policies, run/adapter identity, failure and all counters
+35     Keccak-256 of words 0..34
+```
+
+The 35-word payload includes capacity, suite, recorded semantic namespace,
+seed, attempt identity, generation/ordinary/bound fingerprints, original and
+reduced digests, all seven `RunStats`, all five `ShrinkStats`, and shrink-status
+tag. The digest excludes its own word. The raw decoder requires exactly 1,152
+bytes and rejects truncation, trailing bytes, unknown versions/flags/tags,
+capacity mismatch at recheck, and digest mismatch. The hash provides only
+unauthenticated self-consistency: anyone who can change the payload can
+recompute it. It is not a signature and does not authenticate an author.
+
+## Full-run recheck
+
+A recheck receives the original `RunConfig` unchanged plus a replay namespace
+different from the recorded namespace. It derives:
+
+```text
+replay_execution = H(EXEC-REPLAY/V1,
+                     bound_run,
+                     capsule_digest,
+                     replay_namespace)
+```
+
+Only execution identity and fixture salts change. Candidate generation,
+semantic run identity, digests, and the expected deterministic run remain
+unchanged. Static validation rejects impossible counters and budget/status
+combinations before callbacks.
+
+On a non-divergent prefix, the recheck executes exactly attempts
+`0..capsule.attempt_index`, including the historical falsifying attempt, then
+repeats its shrink path. A terminal earlier failure or infrastructure divergence
+stops immediately for mismatch/error classification; no path executes a later
+attempt. `Reproduced` requires equality of the failure key, original and reduced
+digests, all seven run counters, all five shrink counters, and shrink
+status.
+A pass/exhaustion is `FailureNotObserved`; callback failures remain structured
+replay infrastructure errors; any exact-evidence difference is identified as
+`EvidenceMismatch`.
+
+`StatefulReplayRegistry` is separate from `StatefulRunRegistry` and keys
+`(suite_id, replay_namespace)`. Its claim is transactional: rejection
+before the first `Ready` preflight preserves the input registry; work after
+`Ready` adopts the claim. Like the run registry, it has eight entries, is
+caller-owned and resettable, and proves no global uniqueness.
+
 ## Executable evidence
 
 The root suite exercises configuration/plan/registry precedence; zero target;
 pass, discard, exhaustion, fail, and infrastructure outcomes; exact contexts;
 state and shrink-budget precedence; original and shrink preflight failures;
 evaluator infrastructure; both receipt-protocol errors; mixed shrink verdicts;
-and exact registry adoption. The root contains 97 tests and remains
-contract-free.
+and exact registry adoption. The root contains 108 tests and remains
+contract-free. The bound-recheck suite covers identity/receipt mismatch, wire
+roundtrip and raw-length rejection, digest self-consistency, replay-registry
+transactions, exact evidence comparison, fresh execution identity, and
+overflow-safe pre-callback validation.
 
 The isolated `tests/stateful-runner` golden uses the public runner and two
 consumer-defined callables sharing one mutable EVM provider. In one test it
@@ -148,7 +248,7 @@ fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
 
 ## Non-certification boundary
 
-The current evidence does not prove any of the following:
+The verified recheck does not prove any of the following:
 
 - that an arbitrary preflight is non-mutating;
 - that an arbitrary returning evaluator deployed all three contracts or used a
@@ -156,14 +256,18 @@ The current evidence does not prove any of the following:
 - that zero observed code implies CREATE2 success;
 - that the caller-owned registry prevents reuse after it is reset;
 - that addresses remain stable across compiler/build changes;
-- that the run or fixture fingerprint authenticates bytecode, adapter, model,
-  or fixture policy;
-- that a stateful failure can be replayed from a capsule;
 - that a new outer EVM is created for each evaluation;
 - that this scheduler golden by itself establishes AccountingLedger behavior.
 
-The separate [`ACCOUNTING_LEDGER.md`](ACCOUNTING_LEDGER.md) demonstration now
-supplies that concrete adapter evidence under the same non-certification limits.
+The bound identity does commit to bytecode, source, model/schema identities,
+fixture policy, and toolchain; it deliberately does not promise cross-build
+address stability. The capsule supports deterministic full-run replay, but its
+digest is unauthenticated and recomputable, not a signature; the generic
+callback remains a trust boundary.
+
+The separate [`ACCOUNTING_LEDGER.md`](ACCOUNTING_LEDGER.md) demonstration fixes
+a concrete trusted identity, observes runtime hashes before actions, and
+supplies end-to-end EVM replay evidence under those limits.
 
 The golden establishes behavior for its concrete adapter on the pinned
 toolchain. Statefulness is isolated by fresh contracts and a fresh local model

@@ -9,14 +9,22 @@ failure capsules. Alongside it, an explicitly experimental stateful
 `ActionSeq<u256, N>` runner now owns deterministic scheduling, fresh-evaluation
 identity, budgets, counters, and failure-key-preserving shrinking for a fixed
 three-contract P0 fixture. Consumer-defined EVM callbacks remain a documented
-trust boundary, so this path is not certified and does not produce replay
-capsules.
+trust boundary, so this path is not certified.
+
+A separate manifest-bound layer now emits a canonical stateful capsule and
+performs a fresh full-run recheck: it repeats the attempt prefix, failing
+attempt, and shrink path under a distinct execution identity, then compares all
+recorded evidence exactly. On a non-divergent prefix it executes attempts
+`0..attempt_index`; a terminal earlier divergence stops there, and no path ever
+executes a later attempt. This is verified replay, not certification of an arbitrary
+callback.
 
 The separate AccountingLedger C6a demonstration applies that boundary to a
 two-actor ledger, exposes a self-transfer aliasing defect, and deterministically
 shrinks it to `Deposit(A,1), Transfer(A,A,1)`. A corrected target is exercised
-with the same generated workload. This remains experimental evidence, not a
-stateful replay or certification claim.
+with the same generated workload. Its specialized wrapper fixes the adapter
+identity, observes runtime code hashes, and exercises the manifest-bound replay
+path without claiming type-level certification.
 
 ## What works now
 
@@ -54,6 +62,19 @@ stateful replay or certification claim.
   adoption, deterministic original/shrink contexts, scheduler-side fixed
   deployment accounting, validated action receipts, and the same failure-key
   shrink discipline as the pure sequence runner;
+- a manifest-bound stateful layer with separate semantic and execution
+  identities, request-bound receipts, observed fixture evidence, a caller-owned
+  replay registry, and an exact full-run recheck;
+- a canonical stateful wire containing 35 payload words plus one self-excluded
+  digest word: exactly 36 big-endian words / 1,152 bytes, with exact-length,
+  version, flag, tag, capacity, and digest validation;
+- adapter identity binding the protocol and fixture plan, concrete fixture
+  policy, action/model/snapshot/failure schemas, adapter logic, target initcode,
+  the actor initcode template at `Address::zero()`, runtime hashes, source
+  bundle, and pinned toolchain/build profile;
+- dynamic fixture evidence binding the adapter, the three deployed addresses,
+  both actor initcode hashes instantiated with the actual target, and the three
+  observed runtime code hashes into every callback receipt;
 - a separate Fe 26.5.0 probe ingot covering exact CREATE2 prediction, a
   three-contract Target/ActorA/ActorB fixture, bound proxy callers, two isolated
   fixtures in one EVM, conservative occupied-address preflight, direct
@@ -64,28 +85,38 @@ stateful replay or certification claim.
 - a separate AccountingLedger ingot with a packed action word, pure
   preview/commit model, bound ActorA/ActorB proxies, buggy and fixed targets,
   failure-key-stable invariant precedence, and a curated seed whose current
-  shrink reaches the local witness `Deposit(A,1), Transfer(A,A,1)`;
+  shrink reaches the local witness `Deposit(A,1), Transfer(A,A,1)`, plus a
+  specialized manifest-bound replay that uses fresh fixture addresses and
+  reproduces all recorded counters exactly;
 - independent PyCryptodome goldens for canonical preimages plus mutation tests
   for every scalar strategy and run fingerprint field, plus independent C6a
-  fingerprints, RNG draws, model execution, shrink trace, and counters.
+  fingerprints, RNG draws, model execution, shrink trace, counters, adapter
+  identities, capsule wire, and execution identities;
+- an independent eleven-test Python verifier for the AccountingLedger source
+  bundle, pinned Fe binary, semantic domains, and declared
+  backend/profile/optimization policy.
 
-The root ingot contains 97 passing Fe tests, the isolated EVM capability ingot
+The root ingot contains 108 passing Fe tests, the isolated EVM capability ingot
 contains 9, the isolated stateful-runner ingot contains 2, and the dedicated
-AccountingLedger ingot contains 14, for 122 passing Fe tests in total. The
+AccountingLedger ingot contains 15, for 134 passing Fe tests in total. The
 sequence tests include all
 small values in `0..2` at every logical length through three, comparison against
 an independent reference enumerator, exact shrink order and deduplication,
 private-tail independence, capacities zero through the deliberately supported
 maximum of four, termination after all 1,038 worst-case candidates, RNG
-consumption across every physical slot, and canonical assertions backed by 32
+consumption across every physical slot, and canonical assertions backed by
 independent Python vectors, including the sequence run fingerprint, a non-edge
 attempt at index four through its complete RNG chain and value digest, and the
-754-byte fixture-salt preimage. The C6a oracle retains all 32 earlier vectors
-and adds the AccountingLedger packed-domain fingerprints, seed 1608 attempt,
-four Keccak draws, exact shrink trace, and corrected 8/8 rejection accounting.
+754-byte fixture-salt preimage. The oracle verifies 32 pre-C6a vectors plus 25
+AccountingLedger vectors covering the packed domain, seed 1608 attempt, four
+Keccak draws, exact shrink trace, corrected 8/8 rejection accounting, six exact
+semantic domains, and bound replay identities.
 Nine EVM probes separately verify the test-only deployment boundary. Two
 additional EVM tests exercise the experimental runner and its direct CREATE2
-revert boundary without extending the certified capsule APIs.
+revert boundary without extending the pure certified capsule APIs. The root
+stateful tests additionally exercise manifest and receipt mismatch, exact raw
+wire length, capsule self-consistency, replay-registry transactions, fresh
+execution identity, and exact full-run evidence comparison.
 
 ## Verify
 
@@ -124,7 +155,18 @@ python tools/oracle_vectors.py
 ```
 
 CI locks its Linux x86-64 oracle wheel by SHA-256 in
-`tools/requirements-oracle-ci.txt`.
+`tools/requirements-oracle-ci.txt`. It also runs the source/toolchain manifest
+verifier with the exact Fe binary used for the test job:
+
+```sh
+python -m unittest tools/test_adapter_manifest.py
+python tools/adapter_manifest.py \
+  --check \
+  --fe "$(command -v fe)" \
+  --backend sonatina \
+  --profile test \
+  --opt 1
+```
 
 ## Layout
 
@@ -145,6 +187,9 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
   validation, atomic admission, and a caller-owned run registry.
 - `src/stateful_action_seq_runner.fe`: experimental P0 scheduler, effect-row
   callback boundary, stateful accounting, and shrinking.
+- `src/stateful_bound_recheck.fe`: manifest-bound receipts, canonical stateful
+  capsule/wire, replay registry, and exact full-run recheck; this is a verified
+  boundary, not callback certification.
 - `tests/evm-probes`: separate ingot containing CREATE2, bound-proxy,
   freshness, occupied-address, and revert-boundary evidence.
 - `tests/stateful-runner`: separate ingot containing the full experimental
@@ -158,6 +203,8 @@ CI locks its Linux x86-64 oracle wheel by SHA-256 in
   kernel, runner, capsule, canonical salt, budget, registry, accounting,
   callback-protocol, tamper, and failure-classification evidence.
 - `tools/oracle_vectors.py`: independent canonical-preimage oracle.
+- `tools/adapter_manifest.py`: independent AccountingLedger source/toolchain
+  manifest verifier.
 - `docs/SEMANTICS.md`: normative behavior implemented by the current slice.
 - `docs/EVM_PROBES.md`: exact EVM evidence and its claim boundary.
 - `docs/STATEFUL_RUNNER.md`: experimental scheduler protocol, evidence, and
@@ -179,13 +226,23 @@ receipts. Its isolated golden exercises a fresh fixture and local model on every
 candidate. AccountingLedger now supplies a concrete model-based consumer and a
 fixed-target comparison with the same deterministic generated sequence.
 
-This does not make the stateful path certified: Fe does not prove that the
-preflight is non-mutating or that a returning evaluator really completed the
-three deployments, and the current fingerprints do not bind adapter bytecode,
-model, or fixture policy. Stateful capsule/replay, external capsule
-serialization/decoding, and a bound adapter identity remain in development.
-The AccountingLedger seed is curated and its result is only a local minimum
-under the current shrink order. Gate C is therefore still partial.
+The manifest-bound layer closes the implemented Gate C replay slice: its
+identity binds the adapter, policies, code hashes, source bundle, and pinned
+build; its wire is externally serializable and length-exact; and replay repeats
+the complete deterministic run under fresh salts before accepting exact
+evidence. AccountingLedger specializes that boundary and checks all three
+runtime code hashes before bindings, initial state, or actions.
+
+This still does not make the generic stateful callback certified. Fe does not
+prove that an arbitrary preflight is non-mutating or that an arbitrary
+returning evaluator honored the deployment/model protocol. The capsule hash
+provides unauthenticated self-consistency, not a signature, authorship, or
+authority; anyone able to change the payload can recompute it. The trusted
+expected manifest comes from the local wrapper, not from the capsule itself.
+Both registries are caller-owned and resettable, so neither provides global
+uniqueness. The AccountingLedger seed is curated and `[1,17]` is only a local
+minimum under the current shrink order. No cross-toolchain address stability,
+fresh outer EVM per candidate, or production-ledger security claim is made.
 
 See [PROVENANCE.md](PROVENANCE.md) for the contest boundary, prior-work
 disclosure, starter reuse, and AI-assistance statement.
