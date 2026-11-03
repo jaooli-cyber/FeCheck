@@ -59,7 +59,7 @@ jobs:
       - run: fe test tests/evm-probes --backend sonatina --profile test -O 1 --jobs 1
       - run: fe test tests/stateful-runner --backend sonatina --profile test -O 1 --jobs 1
       - run: fe test tests/accounting-ledger --backend sonatina --profile test -O 1 --jobs 1
-      - name: Verify independent Keccak oracle
+      - name: Verify independent Python evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -68,4 +68,12 @@ jobs:
             --disable-pip-version-check \
             --require-hashes \
             -r tools/requirements-oracle-ci.txt
+          "$RUNNER_TEMP/oracle/bin/python" -m unittest -v \
+            tools/test_adapter_manifest.py
+          "$RUNNER_TEMP/oracle/bin/python" tools/adapter_manifest.py \
+            --check \
+            --fe "$RUNNER_TEMP/fe" \
+            --backend sonatina \
+            --profile test \
+            --opt 1
           "$RUNNER_TEMP/oracle/bin/python" tools/oracle_vectors.py
