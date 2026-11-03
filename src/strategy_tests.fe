@@ -1,0 +1,51 @@
+use ingot::{GenerationResult, Strategy, U256Range, generate}
+use std::evm::random::{ReplayRng, Rng}
+
+fn expect_generated(_ result: GenerationResult<u256>) -> u256 {
+    match result {
+        GenerationResult::Value(value) => value,
+        GenerationResult::InfrastructureError(_) => {
+            assert!(false)
+            0
+        },
+    }
+}
+
+#[test]
+fn scalar_strategy_forwards_rng_and_handles_full_domain() {
+    let singleton = U256Range { lo: 7, hi: 7, origin: 7, max_rejections: 0 }
+    var untouched = ReplayRng::new([5, 9])
+    let singleton_value = with (Rng = untouched) {
+        expect_generated(generate(singleton))
+    }
+    assert!(singleton_value == 7)
+    assert!(untouched.next() == 5)
+
+    let full = U256Range { lo: 0, hi: u256::max(), origin: 0, max_rejections: 0 }
+    var consumed = ReplayRng::new([5, 9])
+    let full_value = with (Rng = consumed) {
+        expect_generated(generate(full))
+    }
+    assert!(full_value == 5)
+    assert!(consumed.next() == 9)
+}
+
+#[test]
+fn bounded_generation_is_unbiased_and_rejection_capped() {
+    let range = U256Range { lo: 0, hi: 2, origin: 0, max_rejections: 1 }
+    var replay = ReplayRng::new([0, 5])
+    let value = with (Rng = replay) {
+        expect_generated(generate(range))
+    }
+    assert!(value == 2)
+
+    let capped = U256Range { lo: 0, hi: 2, origin: 0, max_rejections: 0 }
+    var rejected = ReplayRng::new([0])
+    let result = with (Rng = rejected) {
+        generate(capped)
+    }
+    match result {
+        GenerationResult::Value(_) => assert!(false),
+        GenerationResult::InfrastructureError(error) => assert!(error.kind == 2),
+    }
+}

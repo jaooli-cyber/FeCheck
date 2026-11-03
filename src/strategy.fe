@@ -1,0 +1,108 @@
+use super::outcome::ErrorCode
+use super::scalar::{ScalarShrinkCursor, ScalarShrinkStep, scalar_shrink_next, scalar_shrink_start}
+use std::evm::random::Rng
+
+pub enum GenerationResult<T> {
+    Value(T),
+    InfrastructureError(ErrorCode),
+}
+
+impl<T> Copy for GenerationResult<T> where T: Copy {}
+
+pub enum StrategyShrinkStep<V, C> {
+    Done,
+    Candidate { pub value: V, pub cursor: C },
+}
+
+impl<V, C> Copy for StrategyShrinkStep<V, C> where V: Copy, C: Copy {}
+
+pub trait Strategy {
+    uses E
+    type Value: Copy
+    type Cursor: Copy
+
+    fn origin(self) -> Self::Value
+    fn random(self) -> GenerationResult<Self::Value> uses E
+    fn shrink_start(self, _ value: Self::Value) -> Self::Cursor
+    fn shrink_next(self, _ cursor: Self::Cursor) -> StrategyShrinkStep<Self::Value, Self::Cursor>
+}
+
+pub struct U256Range { pub lo: u256, pub hi: u256, pub origin: u256, pub max_rejections: u256 }
+
+impl Copy for U256Range {}
+
+#[arithmetic(unchecked)]
+fn bounded_uniform(_ upper: u256, _ max_rejections: u256) -> GenerationResult<u256>
+uses (rng: mut Rng)
+{
+    if upper == 0 {
+        return GenerationResult::InfrastructureError(ErrorCode { kind: 1, detail: 0 })
+    }
+
+    let threshold = (0 - upper) % upper
+    var rejected: u256 = 0
+    while rejected <= max_rejections {
+        let word = rng.next()
+        if word >= threshold {
+            return GenerationResult::Value(word % upper)
+        }
+        if rejected == max_rejections {
+            return GenerationResult::InfrastructureError(ErrorCode { kind: 2, detail: rejected })
+        }
+        rejected += 1
+    }
+
+    GenerationResult::InfrastructureError(ErrorCode { kind: 2, detail: rejected })
+}
+
+impl Strategy for U256Range {
+    uses E = (rng: mut Rng)
+    type Value = u256
+    type Cursor = ScalarShrinkCursor
+
+    fn origin(self) -> u256 {
+        self.origin
+    }
+
+    fn random(self) -> GenerationResult<u256> uses E {
+        if self.lo > self.hi || self.origin < self.lo || self.origin > self.hi {
+            return GenerationResult::InfrastructureError(ErrorCode { kind: 3, detail: self.origin })
+        }
+        if self.lo == self.hi {
+            return GenerationResult::Value(self.lo)
+        }
+        if self.lo == 0 && self.hi == u256::max() {
+            return GenerationResult::Value(rng.next())
+        }
+
+        let span = self.hi - self.lo + 1
+        match bounded_uniform(span, self.max_rejections) {
+            GenerationResult::Value(offset) => GenerationResult::Value(self.lo + offset),
+            GenerationResult::InfrastructureError(error) => {
+                GenerationResult::InfrastructureError(error)
+            },
+        }
+    }
+
+    fn shrink_start(self, _ value: u256) -> ScalarShrinkCursor {
+        scalar_shrink_start(self.origin, value)
+    }
+
+    fn shrink_next(self, _ cursor: ScalarShrinkCursor) -> StrategyShrinkStep<
+        u256,
+        ScalarShrinkCursor,
+    > {
+        match scalar_shrink_next(cursor) {
+            ScalarShrinkStep::Done => StrategyShrinkStep::Done,
+            ScalarShrinkStep::Candidate { value, cursor: next } => {
+                StrategyShrinkStep::Candidate { value, cursor: next }
+            },
+        }
+    }
+}
+
+pub fn generate<S: Strategy>(_ strategy: S) -> GenerationResult<S::Value>
+uses S::E
+{
+    strategy.random()
+}
